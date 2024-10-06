@@ -5,15 +5,21 @@
 
 use cortex_m_rt::entry;
 use heapless::spsc::Queue;
+use nrf24l01_commands::{registers, Command};
 use panic_semihosting as _; // logs messages to the host stderr; requires a debugger
 use stm32l4::stm32l4x2::{interrupt, Interrupt, Peripherals, SPI1, USART2};
+
+const TX_ADDR: u64 = 0xA2891FFF6A;
+const PAYLOAD: [u8; 32] = [97; 32];
 
 static mut USART2_PERIPHERAL: Option<USART2> = None;
 static mut SPI1_PERIPHERAL: Option<SPI1> = None;
 /// Bytes to be transmitted over SPI1
-static mut TX_BUFFER: Option<Queue<u8, 16>> = None;
+static mut TX_BUFFER: Option<Queue<u8, 64>> = None;
 /// Bytes received over SPI1
 static mut RX_BUFFER: Option<Queue<u16, 16>> = None;
+/// Queued nRF24l01 commands
+static mut COMMANDS: Option<Queue<&[u8], 4>> = None;
 
 #[interrupt]
 fn USART2() {
@@ -43,18 +49,125 @@ fn USART2() {
 
         match received_byte {
             97 => {
+                // a
                 // NOP
-                let _ = tx_buffer.enqueue(255);
+                let _ = tx_buffer.enqueue(Command::Nop.word());
             }
             98 => {
+                // b
                 // Read Config
-                let _ = tx_buffer.enqueue(0);
+                let _ = tx_buffer
+                    .enqueue(Command::ReadRegister(registers::Address::Config as u8).word());
                 let _ = tx_buffer.enqueue(0);
             }
             99 => {
+                // c
                 // Write Config
-                let _ = tx_buffer.enqueue(32);
-                let _ = tx_buffer.enqueue(11);
+                let _ = tx_buffer
+                    .enqueue(Command::WriteRegister(registers::Address::Config as u8).word());
+                let _ = tx_buffer.enqueue(
+                    registers::Config::default()
+                        .with_pwr_up(true)
+                        .with_mask_max_rt(true)
+                        .with_mask_rx_dr(true)
+                        .into_bits(),
+                );
+            }
+            100 => {
+                // d
+                // Write TX addr
+                let _ = tx_buffer
+                    .enqueue(Command::WriteRegister(registers::Address::TxAddr as u8).word());
+                for byte in registers::TxAddr::default()
+                    .with_tx_addr(TX_ADDR)
+                    .as_payload()
+                {
+                    let _ = tx_buffer.enqueue(byte);
+                }
+            }
+            101 => {
+                // e
+                // Read TX addr
+                let _ = tx_buffer
+                    .enqueue(Command::ReadRegister(registers::Address::TxAddr as u8).word());
+                for _ in 0..5 {
+                    let _ = tx_buffer.enqueue(0);
+                }
+            }
+            102 => {
+                // f
+                // Write Rx Addr P0
+                let _ = tx_buffer
+                    .enqueue(Command::WriteRegister(registers::Address::RxAddrP0 as u8).word());
+                for byte in registers::RxAddrP0::default()
+                    .with_rx_addr_p0(TX_ADDR)
+                    .as_payload()
+                {
+                    let _ = tx_buffer.enqueue(byte);
+                }
+            }
+            103 => {
+                // g
+                // Read RX Addr P0
+                let _ = tx_buffer
+                    .enqueue(Command::ReadRegister(registers::Address::RxAddrP0 as u8).word());
+                for _ in 0..5 {
+                    let _ = tx_buffer.enqueue(0);
+                }
+            }
+            104 => {
+                // h
+                // ACTIVATE
+                let _ = tx_buffer.enqueue(Command::Activate.word());
+                let _ = tx_buffer.enqueue(0x73);
+            }
+            105 => {
+                // i
+                // Write feature register
+                let _ = tx_buffer
+                    .enqueue(Command::WriteRegister(registers::Address::Feature as u8).word());
+                let _ = tx_buffer.enqueue(
+                    registers::Feature::default()
+                        .with_en_dyn_ack(true)
+                        .into_bits(),
+                );
+            }
+            106 => {
+                // j
+                // Read feature register
+                let _ = tx_buffer
+                    .enqueue(Command::ReadRegister(registers::Address::Feature as u8).word());
+                let _ = tx_buffer.enqueue(0);
+            }
+            107 => {
+                // k
+                // Write payload
+                let _ = tx_buffer.enqueue(Command::WriteTxPayloadNoAck.word());
+                for byte in PAYLOAD {
+                    let _ = tx_buffer.enqueue(byte);
+                }
+            }
+            108 => {
+                // l
+                // Clear TX_DS flag
+                let _ = tx_buffer
+                    .enqueue(Command::WriteRegister(registers::Address::Status as u8).word());
+                let _ =
+                    tx_buffer.enqueue(registers::Status::default().with_tx_ds(true).into_bits());
+            }
+            109 => {
+                // m
+                // Write RF_CH
+                let _ = tx_buffer
+                    .enqueue(Command::WriteRegister(registers::Address::RfCh as u8).word());
+                let _ = tx_buffer.enqueue(registers::RfCh::default().with_rf_ch(110).into_bits());
+            }
+            110 => {
+                // n
+                // Read RF_CH
+                let _ =
+                    tx_buffer.enqueue(Command::ReadRegister(registers::Address::RfCh as u8).word());
+                let _ = tx_buffer.enqueue(0);
             }
             _ => (),
         }
@@ -115,8 +228,13 @@ fn main() -> ! {
 
     // USART2: A2 (TX), A3 (RX) as AF 7
     // SPI1: A4 (NSS), A5 (SCK), A6 (MISO), A7 (MOSI) as AF 5
+    // GPIO: A1 (IRQ), A0 (CE)
     dp.GPIOA.moder().write(|w| {
-        w.moder2()
+        w.moder0()
+            .output()
+            .moder1()
+            .input()
+            .moder2()
             .alternate()
             .moder3()
             .alternate()
@@ -129,7 +247,11 @@ fn main() -> ! {
             .moder7()
             .alternate()
     });
-    dp.GPIOA.pupdr().write(|w| w.pupdr4().pull_up());
+    dp.GPIOA.otyper().write(|w| w.ot0().push_pull());
+    // NSS, IRQ are active low
+    dp.GPIOA
+        .pupdr()
+        .write(|w| w.pupdr1().pull_up().pupdr4().pull_up());
     dp.GPIOA.ospeedr().write(|w| {
         w.ospeedr2()
             .very_high_speed()
@@ -192,6 +314,7 @@ fn main() -> ! {
     });
 
     unsafe {
+        COMMANDS = Some(Queue::default());
         TX_BUFFER = Some(Queue::default());
         RX_BUFFER = Some(Queue::default());
         // Unmask NVIC USART2 global interrupt

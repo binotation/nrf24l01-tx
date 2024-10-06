@@ -2,7 +2,7 @@
 authors = ["binotation"]
 edition = "2021"
 readme = "README.md"
-name = "nRF24L01-demo"
+name = "nrf24l01-echo"
 version = "0.1.0"
 
 [dependencies]
@@ -22,9 +22,12 @@ heapless = "0.8.0"
 path = "../../stm32-rs-nightlies/stm32l4"
 features = ["stm32l4x2"]
 
+[dependencies.nrf24l01-commands]
+path = "../../god-is-a-crab/nrf24l01-commands"
+
 # this lets you use `cargo fix`!
 [[bin]]
-name = "nRF24L01-demo"
+name = "nrf24l01-echo"
 test = false
 bench = false
 
