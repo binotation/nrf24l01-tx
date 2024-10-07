@@ -4,7 +4,7 @@
 #![no_main]
 
 use cortex_m_rt::entry;
-use heapless::spsc::Queue;
+use heapless::{spsc::Queue, Vec};
 use nrf24l01_commands::{registers, Command};
 use panic_semihosting as _; // logs messages to the host stderr; requires a debugger
 use stm32l4::stm32l4x2::{interrupt, Interrupt, Peripherals, SPI1, USART2};
@@ -17,9 +17,9 @@ static mut SPI1_PERIPHERAL: Option<SPI1> = None;
 /// Bytes to be transmitted over SPI1
 static mut TX_BUFFER: Option<Queue<u8, 64>> = None;
 /// Bytes received over SPI1
-static mut RX_BUFFER: Option<Queue<u16, 16>> = None;
+static mut RX_BUFFER: Option<Queue<u16, 64>> = None;
 /// Queued nRF24l01 commands
-static mut COMMANDS: Option<Queue<&[u8], 4>> = None;
+static mut COMMANDS: Option<Queue<Vec<u8, 64>, 4>> = None;
 
 #[interrupt]
 fn USART2() {
@@ -28,6 +28,7 @@ fn USART2() {
     let spi1 = unsafe { SPI1_PERIPHERAL.as_mut() }.unwrap();
     let tx_buffer = unsafe { TX_BUFFER.as_mut() }.unwrap();
     let rx_buffer = unsafe { RX_BUFFER.as_mut() }.unwrap();
+    let command_queue = unsafe { COMMANDS.as_mut() }.unwrap();
 
     // Dequeue bytes off rx buffer and transmit over USART2
     if usart2.isr().read().txe().bit_is_set() {
@@ -51,7 +52,9 @@ fn USART2() {
             97 => {
                 // a
                 // NOP
-                let _ = tx_buffer.enqueue(Command::Nop.word());
+                let mut command: Vec<u8, 64> = Vec::new();
+                let _ = command.push(Command::Nop.word());
+                let _ = command_queue.enqueue(command);
             }
             98 => {
                 // b
@@ -186,6 +189,7 @@ fn SPI1() {
     let usart2 = unsafe { USART2_PERIPHERAL.as_mut() }.unwrap();
     let tx_buffer = unsafe { TX_BUFFER.as_mut() }.unwrap();
     let rx_buffer = unsafe { RX_BUFFER.as_mut() }.unwrap();
+    let command_queue = unsafe { COMMANDS.as_mut() }.unwrap();
 
     // Transmit bytes from tx buffer
     if spi1.sr().read().txe().bit_is_set() {
@@ -194,14 +198,33 @@ fn SPI1() {
                 spi1.dr8().write(|w| unsafe { w.dr().bits(byte) });
 
                 if tx_buffer.is_empty() {
+                    // Buffer empty -> pull NSS high
                     while spi1.sr().read().bsy().bit_is_set() {}
                     spi1.cr1().modify(|_, w| w.spe().disabled());
-                    spi1.cr2().modify(|_, w| w.txeie().clear_bit());
+                    // Queue bytes of next command
+                    if let Some(next_command) = command_queue.dequeue() {
+                        for &byte in next_command.iter() {
+                            let _ = tx_buffer.enqueue(byte);
+                        }
+                        // Buffer non-empty -> Pull NSS low
+                        spi1.cr1().modify(|_, w| w.spe().enabled());
+                    } else {
+                        spi1.cr2().modify(|_, w| w.txeie().clear_bit());
+                    }
                 }
             }
             None => {
-                spi1.cr1().modify(|_, w| w.spe().disabled());
-                spi1.cr2().modify(|_, w| w.txeie().clear_bit());
+                // Initial commands
+                if let Some(next_command) = command_queue.dequeue() {
+                    spi1.dr8()
+                        .write(|w| unsafe { w.dr().bits(next_command[0]) });
+                    for &byte in next_command[1..].iter() {
+                        let _ = tx_buffer.enqueue(byte);
+                    }
+                } else {
+                    spi1.cr1().modify(|_, w| w.spe().disabled());
+                    spi1.cr2().modify(|_, w| w.txeie().clear_bit());
+                }
             }
         }
     }
@@ -314,13 +337,27 @@ fn main() -> ! {
     });
 
     unsafe {
-        COMMANDS = Some(Queue::default());
+        let mut command_queue = Queue::default();
+        let mut nop_command = Vec::new();
+        let _ = nop_command.push(Command::Nop.word());
+        let _ = command_queue.enqueue(nop_command);
+        COMMANDS = Some(command_queue);
         TX_BUFFER = Some(Queue::default());
         RX_BUFFER = Some(Queue::default());
         // Unmask NVIC USART2 global interrupt
         cortex_m::peripheral::NVIC::unmask(Interrupt::SPI1);
         cortex_m::peripheral::NVIC::unmask(Interrupt::USART2);
         SPI1_PERIPHERAL = Some(dp.SPI1);
+        SPI1_PERIPHERAL
+            .as_mut()
+            .unwrap()
+            .cr2()
+            .modify(|_, w| w.txeie().set_bit());
+        SPI1_PERIPHERAL
+            .as_mut()
+            .unwrap()
+            .cr1()
+            .modify(|_, w| w.spe().enabled());
         USART2_PERIPHERAL = Some(dp.USART2);
     }
 
