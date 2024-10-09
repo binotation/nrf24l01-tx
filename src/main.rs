@@ -5,7 +5,7 @@
 
 use cortex_m_rt::entry;
 use heapless::{spsc::Queue, Vec};
-use nrf24l01_commands::{registers, Command};
+use nrf24l01_commands::{commands, commands::Command, registers};
 use panic_semihosting as _; // logs messages to the host stderr; requires a debugger
 use stm32l4::stm32l4x2::{interrupt, Interrupt, Peripherals, SPI1, USART2};
 
@@ -21,12 +21,18 @@ static mut RX_BUFFER: Option<Queue<u16, 64>> = None;
 /// Queued nRF24l01 commands
 static mut COMMANDS: Option<Queue<Vec<u8, 64>, 16>> = None;
 
+#[inline(always)]
+fn enqueue_command(queue: &mut Queue<Vec<u8, 64>, 16>, command_bytes: &[u8]) {
+    let mut command = Vec::new();
+    let _ = command.extend_from_slice(command_bytes);
+    let _ = queue.enqueue(command);
+}
+
 #[interrupt]
 fn USART2() {
     // SAFETY: race condition where USART2_PERIPHERAL can be accessed before being set
     let usart2 = unsafe { USART2_PERIPHERAL.as_mut() }.unwrap();
     let spi1 = unsafe { SPI1_PERIPHERAL.as_mut() }.unwrap();
-    let tx_buffer = unsafe { TX_BUFFER.as_mut() }.unwrap();
     let rx_buffer = unsafe { RX_BUFFER.as_mut() }.unwrap();
     let command_queue = unsafe { COMMANDS.as_mut() }.unwrap();
 
@@ -53,76 +59,64 @@ fn USART2() {
                 // a
                 // NOP
                 let mut command: Vec<u8, 64> = Vec::new();
-                let _ = command.push(Command::Nop.word());
+                let _ = command.push(commands::Nop::WORD);
                 let _ = command_queue.enqueue(command);
             }
             98 => {
                 // b
                 // Read RF_CH
-                let _ =
-                    tx_buffer.enqueue(Command::ReadRegister(registers::Address::RfCh as u8).word());
-                let _ = tx_buffer.enqueue(0);
+                enqueue_command(
+                    command_queue,
+                    &commands::ReadRegister::<registers::RfCh>::bytes(),
+                );
             }
             99 => {
                 // c
                 // Read TX addr
-                let _ = tx_buffer
-                    .enqueue(Command::ReadRegister(registers::Address::TxAddr as u8).word());
-                for _ in 0..5 {
-                    let _ = tx_buffer.enqueue(0);
-                }
+                enqueue_command(
+                    command_queue,
+                    &commands::ReadRegister::<registers::TxAddr>::bytes(),
+                );
             }
             100 => {
                 // d
                 // Read RX Addr P0
-                let _ = tx_buffer
-                    .enqueue(Command::ReadRegister(registers::Address::RxAddrP0 as u8).word());
-                for _ in 0..5 {
-                    let _ = tx_buffer.enqueue(0);
-                }
+                enqueue_command(
+                    command_queue,
+                    &commands::ReadRegister::<registers::RxAddrP0>::bytes(),
+                );
             }
             101 => {
                 // e
                 // Read feature register
-                let _ = tx_buffer
-                    .enqueue(Command::ReadRegister(registers::Address::Feature as u8).word());
-                let _ = tx_buffer.enqueue(0);
+                enqueue_command(
+                    command_queue,
+                    &commands::ReadRegister::<registers::Feature>::bytes(),
+                );
             }
             102 => {
                 // f
                 // Read Config
-                let _ = tx_buffer
-                    .enqueue(Command::ReadRegister(registers::Address::Config as u8).word());
-                let _ = tx_buffer.enqueue(0);
+                enqueue_command(
+                    command_queue,
+                    &commands::ReadRegister::<registers::Config>::bytes(),
+                );
             }
             103 => {
                 // g
-                // Write Config
-                let _ = tx_buffer
-                    .enqueue(Command::WriteRegister(registers::Address::Config as u8).word());
-                let _ = tx_buffer.enqueue(
-                    registers::Config::default()
-                        .with_pwr_up(true)
-                        .with_mask_max_rt(true)
-                        .with_mask_rx_dr(true)
-                        .into_bits(),
+                // Write payload
+                enqueue_command(
+                    command_queue,
+                    &commands::WriteTxPayloadNoAck::bytes(PAYLOAD),
                 );
             }
             104 => {
                 // h
-                // Write payload
-                let _ = tx_buffer.enqueue(Command::WriteTxPayloadNoAck.word());
-                for byte in PAYLOAD {
-                    let _ = tx_buffer.enqueue(byte);
-                }
-            }
-            105 => {
-                // i
                 // Clear TX_DS flag
-                let _ = tx_buffer
-                    .enqueue(Command::WriteRegister(registers::Address::Status as u8).word());
-                let _ =
-                    tx_buffer.enqueue(registers::Status::default().with_tx_ds(true).into_bits());
+                enqueue_command(
+                    command_queue,
+                    &commands::WriteRegister(registers::Status::new().with_tx_ds(true)).bytes(),
+                );
             }
             _ => (),
         }
@@ -291,64 +285,53 @@ fn main() -> ! {
     // Initial commands
     let mut command_queue = Queue::default();
 
-    let mut write_rf_ch = Vec::new();
-    let _ = write_rf_ch.push(Command::WriteRegister(registers::Address::RfCh as u8).word());
-    let _ = write_rf_ch.push(registers::RfCh::default().with_rf_ch(110).into_bits());
-
-    let mut read_rf_ch = Vec::new();
-    let _ = read_rf_ch.push(Command::ReadRegister(registers::Address::RfCh as u8).word());
-    let _ = read_rf_ch.push(0);
-
-    let mut write_tx_addr = Vec::new();
-    let _ = write_tx_addr.push(Command::WriteRegister(registers::Address::TxAddr as u8).word());
-    let _ = write_tx_addr.extend_from_slice(
-        &registers::TxAddr::default()
-            .with_tx_addr(TX_ADDR)
-            .as_payload(),
+    enqueue_command(
+        &mut command_queue,
+        &commands::WriteRegister(registers::RfCh::new().with_rf_ch(110)).bytes(),
     );
-
-    let mut read_tx_addr = Vec::new();
-    let _ = read_tx_addr.push(Command::ReadRegister(registers::Address::TxAddr as u8).word());
-    let _ = read_tx_addr.extend_from_slice(&[0; 5]);
-
-    let mut write_rx_addr_p0 = Vec::new();
-    let _ =
-        write_rx_addr_p0.push(Command::WriteRegister(registers::Address::RxAddrP0 as u8).word());
-    let _ = write_rx_addr_p0.extend_from_slice(
-        &registers::RxAddrP0::default()
-            .with_rx_addr_p0(TX_ADDR)
-            .as_payload(),
+    enqueue_command(
+        &mut command_queue,
+        &commands::ReadRegister::<registers::RfCh>::bytes(),
     );
-
-    let mut read_rx_addr_p0 = Vec::new();
-    let _ = read_rx_addr_p0.push(Command::ReadRegister(registers::Address::RxAddrP0 as u8).word());
-    let _ = read_rx_addr_p0.extend_from_slice(&[0; 5]);
-
-    let mut activate = Vec::new();
-    let _ = activate.push(Command::Activate.word());
-    let _ = activate.push(0x73);
-
-    let mut write_feature = Vec::new();
-    let _ = write_feature.push(Command::WriteRegister(registers::Address::Feature as u8).word());
-    let _ = write_feature.push(
-        registers::Feature::default()
-            .with_en_dyn_ack(true)
-            .into_bits(),
+    enqueue_command(
+        &mut command_queue,
+        &commands::WriteRegister(registers::TxAddr::new().with_tx_addr(TX_ADDR)).bytes(),
     );
-
-    let mut read_feature = Vec::new();
-    let _ = read_feature.push(Command::ReadRegister(registers::Address::Feature as u8).word());
-    let _ = read_feature.push(0);
-
-    let _ = command_queue.enqueue(write_rf_ch);
-    let _ = command_queue.enqueue(read_rf_ch);
-    let _ = command_queue.enqueue(write_tx_addr);
-    let _ = command_queue.enqueue(read_tx_addr);
-    let _ = command_queue.enqueue(write_rx_addr_p0);
-    let _ = command_queue.enqueue(read_rx_addr_p0);
-    let _ = command_queue.enqueue(activate);
-    let _ = command_queue.enqueue(write_feature);
-    let _ = command_queue.enqueue(read_feature);
+    enqueue_command(
+        &mut command_queue,
+        &commands::ReadRegister::<registers::TxAddr>::bytes(),
+    );
+    enqueue_command(
+        &mut command_queue,
+        &commands::WriteRegister(registers::RxAddrP0::new().with_rx_addr_p0(TX_ADDR)).bytes(),
+    );
+    enqueue_command(
+        &mut command_queue,
+        &commands::ReadRegister::<registers::RxAddrP0>::bytes(),
+    );
+    enqueue_command(&mut command_queue, &commands::Activate::bytes());
+    enqueue_command(
+        &mut command_queue,
+        &commands::WriteRegister(registers::Feature::new().with_en_dyn_ack(true)).bytes(),
+    );
+    enqueue_command(
+        &mut command_queue,
+        &commands::ReadRegister::<registers::Feature>::bytes(),
+    );
+    enqueue_command(
+        &mut command_queue,
+        &commands::WriteRegister(
+            registers::Config::new()
+                .with_pwr_up(true)
+                .with_mask_max_rt(true)
+                .with_mask_rx_dr(true),
+        )
+        .bytes(),
+    );
+    enqueue_command(
+        &mut command_queue,
+        &commands::ReadRegister::<registers::Config>::bytes(),
+    );
 
     unsafe {
         COMMANDS = Some(command_queue);
