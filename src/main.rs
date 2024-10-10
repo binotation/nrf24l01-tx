@@ -11,7 +11,10 @@ use panic_semihosting as _; // logs messages to the host stderr; requires a debu
 use stm32l4::stm32l4x2::{interrupt, Interrupt, Peripherals, GPIOA, SPI1, TIM2, USART2};
 
 const TX_ADDR: u64 = 0xA2891FFF6A;
-const PAYLOAD: [u8; 32] = [97; 32];
+const PAYLOAD: [u8; 32] = [
+    b't', b'h', b'e', b' ', b'l', b'a', b'z', b'y', b' ', b'f', b'o', b'x', b' ', b'j', b'u', b'm',
+    b'p', b'e', b'd', b' ', b'o', b'v', b'e', b'r', b' ', b't', b'h', b'e', b' ', b'b', b'r', b'o',
+];
 
 struct SyncUnsafeCell<P>(UnsafeCell<Option<P>>);
 
