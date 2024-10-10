@@ -8,7 +8,7 @@ use cortex_m_rt::entry;
 use heapless::{spsc::Queue, Vec};
 use nrf24l01_commands::{commands, commands::Command, registers};
 use panic_semihosting as _; // logs messages to the host stderr; requires a debugger
-use stm32l4::stm32l4x2::{interrupt, Interrupt, Peripherals, SPI1, USART2};
+use stm32l4::stm32l4x2::{interrupt, Interrupt, Peripherals, GPIOA, SPI1, TIM2, USART2};
 
 const TX_ADDR: u64 = 0xA2891FFF6A;
 const PAYLOAD: [u8; 32] = [97; 32];
@@ -31,14 +31,18 @@ impl<P> SyncUnsafeCell<P> {
 
 // SAFETY: CPU is single-threaded. Interrupts cannot execute simultaneously and cannot
 // preempt each other (all interrupts have same priority).
+unsafe impl Sync for SyncUnsafeCell<GPIOA> {}
 unsafe impl Sync for SyncUnsafeCell<USART2> {}
 unsafe impl Sync for SyncUnsafeCell<SPI1> {}
+unsafe impl Sync for SyncUnsafeCell<TIM2> {}
 unsafe impl Sync for SyncUnsafeCell<Queue<u8, 64>> {}
 unsafe impl Sync for SyncUnsafeCell<Queue<u16, 64>> {}
 unsafe impl Sync for SyncUnsafeCell<Queue<Vec<u8, 64>, 16>> {}
 
+static GPIOA_PERIPHERAL: SyncUnsafeCell<GPIOA> = SyncUnsafeCell::new();
 static USART2_PERIPHERAL: SyncUnsafeCell<USART2> = SyncUnsafeCell::new();
 static SPI1_PERIPHERAL: SyncUnsafeCell<SPI1> = SyncUnsafeCell::new();
+static TIM2_PERIPHERAL: SyncUnsafeCell<TIM2> = SyncUnsafeCell::new();
 /// Bytes to be transmitted over SPI1
 static TX_BUFFER: SyncUnsafeCell<Queue<u8, 64>> = SyncUnsafeCell::new();
 /// Bytes received over SPI1
@@ -55,8 +59,10 @@ fn enqueue_command(queue: &mut Queue<Vec<u8, 64>, 16>, command_bytes: &[u8]) {
 
 #[interrupt]
 fn USART2() {
+    let gpioa = GPIOA_PERIPHERAL.get();
     let usart2 = USART2_PERIPHERAL.get();
     let spi1 = SPI1_PERIPHERAL.get();
+    let tim2 = TIM2_PERIPHERAL.get();
     let rx_buffer = RX_BUFFER.get();
     let command_queue = COMMANDS.get();
 
@@ -136,6 +142,13 @@ fn USART2() {
             }
             104 => {
                 // h
+                // pulse CE
+                gpioa.bsrr().write(|w| w.bs0().set_bit());
+                // Enable counter, one-pulse mode
+                tim2.cr1().write(|w| w.opm().enabled().cen().enabled());
+            }
+            105 => {
+                // i
                 // Clear TX_DS flag
                 enqueue_command(
                     command_queue,
@@ -205,6 +218,17 @@ fn SPI1() {
         if rx_buffer.enqueue(received_byte as u16).is_ok() {
             usart2.cr1().modify(|_, w| w.txeie().enabled());
         }
+    }
+}
+
+#[interrupt]
+fn TIM2() {
+    let tim2 = TIM2_PERIPHERAL.get();
+    let gpioa = GPIOA_PERIPHERAL.get();
+
+    if tim2.sr().read().uif().bit_is_set() {
+        gpioa.bsrr().write(|w| w.br0().set_bit());
+        tim2.sr().write(|w| w.uif().clear_bit())
     }
 }
 
@@ -308,6 +332,12 @@ fn main() -> ! {
             .set_bit()
     });
 
+    // Set 11us interval
+    dp.TIM2.arr().write(|w| unsafe { w.arr().bits(44) }); // 4MHz / 44 = 11us
+
+    // Enable TIM2 update interrupt
+    dp.TIM2.dier().write(|w| w.uie().set_bit());
+
     // Initial commands
     let mut command_queue = Queue::new();
 
@@ -366,9 +396,12 @@ fn main() -> ! {
         // Unmask NVIC global interrupts
         cortex_m::peripheral::NVIC::unmask(Interrupt::SPI1);
         cortex_m::peripheral::NVIC::unmask(Interrupt::USART2);
+        cortex_m::peripheral::NVIC::unmask(Interrupt::TIM2)
     }
+    GPIOA_PERIPHERAL.set(dp.GPIOA);
     SPI1_PERIPHERAL.set(dp.SPI1);
     USART2_PERIPHERAL.set(dp.USART2);
+    TIM2_PERIPHERAL.set(dp.TIM2);
 
     // Enable SPI to send initial commands
     let spi1 = SPI1_PERIPHERAL.get();
