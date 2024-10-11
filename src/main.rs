@@ -336,7 +336,7 @@ fn main() -> ! {
     });
 
     // Set 11us interval
-    dp.TIM2.arr().write(|w| unsafe { w.arr().bits(44) }); // 4MHz / 44 = 11us
+    dp.TIM2.arr().write(|w| unsafe { w.arr().bits(44) }); // 44 / 4MHz = 11us
 
     // Enable TIM2 update interrupt
     dp.TIM2.dier().write(|w| w.uie().set_bit());
