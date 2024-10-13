@@ -2,7 +2,7 @@
 authors = ["binotation"]
 edition = "2021"
 readme = "README.md"
-name = "nrf24l01-echo"
+name = "nrf24l01-tx"
 version = "0.1.0"
 
 [dependencies]
@@ -27,7 +27,7 @@ path = "../../god-is-a-crab/nrf24l01-commands"
 
 # this lets you use `cargo fix`!
 [[bin]]
-name = "nrf24l01-echo"
+name = "nrf24l01-tx"
 test = false
 bench = false
 
