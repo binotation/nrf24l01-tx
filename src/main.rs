@@ -100,7 +100,7 @@ fn USART2() {
                 // Read RF_CH
                 enqueue_command(
                     command_queue,
-                    &commands::ReadRegister::<registers::RfCh>::bytes(),
+                    &commands::RRegister::<registers::RfCh>::bytes(),
                 );
             }
             99 => {
@@ -108,7 +108,7 @@ fn USART2() {
                 // Read TX addr
                 enqueue_command(
                     command_queue,
-                    &commands::ReadRegister::<registers::TxAddr>::bytes(),
+                    &commands::RRegister::<registers::TxAddr::<5>>::bytes(),
                 );
             }
             100 => {
@@ -116,7 +116,7 @@ fn USART2() {
                 // Read RX Addr P0
                 enqueue_command(
                     command_queue,
-                    &commands::ReadRegister::<registers::RxAddrP0>::bytes(),
+                    &commands::RRegister::<registers::RxAddrP0::<5>>::bytes(),
                 );
             }
             101 => {
@@ -124,7 +124,7 @@ fn USART2() {
                 // Read feature register
                 enqueue_command(
                     command_queue,
-                    &commands::ReadRegister::<registers::Feature>::bytes(),
+                    &commands::RRegister::<registers::Feature>::bytes(),
                 );
             }
             102 => {
@@ -132,7 +132,7 @@ fn USART2() {
                 // Read Config
                 enqueue_command(
                     command_queue,
-                    &commands::ReadRegister::<registers::Config>::bytes(),
+                    &commands::RRegister::<registers::Config>::bytes(),
                 );
             }
             103 => {
@@ -140,7 +140,7 @@ fn USART2() {
                 // Write payload
                 enqueue_command(
                     command_queue,
-                    &commands::WriteTxPayloadNoAck(PAYLOAD).bytes(),
+                    &commands::WTxPayloadNoack(PAYLOAD).bytes(),
                 );
             }
             104 => {
@@ -155,7 +155,7 @@ fn USART2() {
                 // Clear TX_DS flag
                 enqueue_command(
                     command_queue,
-                    &commands::WriteRegister(registers::Status::new().with_tx_ds(true)).bytes(),
+                    &commands::WRegister(registers::Status::new().with_tx_ds(true)).bytes(),
                 );
             }
             _ => (),
@@ -346,40 +346,40 @@ fn main() -> ! {
 
     enqueue_command(
         &mut command_queue,
-        &commands::WriteRegister(registers::RfCh::new().with_rf_ch(110)).bytes(),
+        &commands::WRegister(registers::RfCh::new().with_rf_ch(110)).bytes(),
     );
     enqueue_command(
         &mut command_queue,
-        &commands::ReadRegister::<registers::RfCh>::bytes(),
+        &commands::RRegister::<registers::RfCh>::bytes(),
     );
     enqueue_command(
         &mut command_queue,
-        &commands::WriteRegister(registers::TxAddr::new().with_tx_addr(TX_ADDR)).bytes(),
+        &commands::WRegister(registers::TxAddr::<5>::new().with_tx_addr(TX_ADDR)).bytes(),
     );
     enqueue_command(
         &mut command_queue,
-        &commands::ReadRegister::<registers::TxAddr>::bytes(),
+        &commands::RRegister::<registers::TxAddr::<5>>::bytes(),
     );
     enqueue_command(
         &mut command_queue,
-        &commands::WriteRegister(registers::RxAddrP0::new().with_rx_addr_p0(TX_ADDR)).bytes(),
+        &commands::WRegister(registers::RxAddrP0::<5>::new().with_rx_addr_p0(TX_ADDR)).bytes(),
     );
     enqueue_command(
         &mut command_queue,
-        &commands::ReadRegister::<registers::RxAddrP0>::bytes(),
+        &commands::RRegister::<registers::RxAddrP0::<5>>::bytes(),
     );
     enqueue_command(&mut command_queue, &commands::Activate::bytes());
     enqueue_command(
         &mut command_queue,
-        &commands::WriteRegister(registers::Feature::new().with_en_dyn_ack(true)).bytes(),
+        &commands::WRegister(registers::Feature::new().with_en_dyn_ack(true)).bytes(),
     );
     enqueue_command(
         &mut command_queue,
-        &commands::ReadRegister::<registers::Feature>::bytes(),
+        &commands::RRegister::<registers::Feature>::bytes(),
     );
     enqueue_command(
         &mut command_queue,
-        &commands::WriteRegister(
+        &commands::WRegister(
             registers::Config::new()
                 .with_pwr_up(true)
                 .with_mask_max_rt(true)
@@ -389,7 +389,7 @@ fn main() -> ! {
     );
     enqueue_command(
         &mut command_queue,
-        &commands::ReadRegister::<registers::Config>::bytes(),
+        &commands::RRegister::<registers::Config>::bytes(),
     );
 
     COMMANDS.set(command_queue);
