@@ -147,6 +147,7 @@ version = "0.1.0"
 dependencies = [
  "cortex-m",
  "cortex-m-rt",
+ "cortex-m-semihosting",
  "heapless",
  "nrf24l01-commands",
  "panic-semihosting",

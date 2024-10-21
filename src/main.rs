@@ -1,10 +1,9 @@
-//! Receive a byte over USART2 and send it over SPI1.
-
 #![no_std]
 #![no_main]
 
 use core::cell::UnsafeCell;
 use cortex_m_rt::entry;
+use cortex_m_semihosting::hprintln;
 use heapless::spsc::Queue;
 use nrf24l01_commands::{commands, registers};
 use panic_semihosting as _; // logs messages to the host stderr; requires a debugger
@@ -32,7 +31,6 @@ const R_FEATURE: [u8; 2] = commands::RRegister::<registers::Feature>::bytes();
 const W_CONFIG: [u8; 2] = commands::WRegister(
     registers::Config::new()
         .with_pwr_up(true)
-        .with_mask_max_rt(true)
         .with_mask_rx_dr(true),
 )
 .bytes();
@@ -101,7 +99,7 @@ impl<const N: usize> SyncBuffer<N> {
 }
 unsafe impl<const N: usize> Sync for SyncBuffer<N> {}
 
-static COMMANDS: SyncQueue<&[u8], 16> = SyncQueue::new();
+static INIT_COMMANDS: SyncQueue<&[u8], 16> = SyncQueue::new();
 static SPI1_RX_BUFFER: SyncBuffer<33> = SyncBuffer::new();
 
 // struct DualBuffer {
@@ -222,10 +220,17 @@ fn USART2() {
 #[interrupt]
 fn DMA1_CH7() {
     let dma1 = DMA1_PERIPHERAL.get();
+    let init_commands = INIT_COMMANDS.get();
+    let spi1 = SPI1_PERIPHERAL.get();
 
     if dma1.isr().read().tcif7().bit_is_set() {
         dma1.ch7().cr().modify(|_, w| w.en().clear_bit());
         dma1.ifcr().write(|w| w.ctcif7().set_bit());
+
+        // Send initialization commands
+        if let Some(command) = init_commands.dequeue() {
+            send_command(command, dma1, spi1);
+        }
     }
 }
 
@@ -234,7 +239,7 @@ fn DMA1_CH7() {
 fn DMA1_CH2() {
     let dma1 = DMA1_PERIPHERAL.get();
     let spi1 = SPI1_PERIPHERAL.get();
-    let commands = COMMANDS.get();
+    let init_commands = INIT_COMMANDS.get();
 
     if dma1.isr().read().tcif2().bit_is_set() {
         dma1.ch2().cr().modify(|_, w| w.en().clear_bit());
@@ -243,14 +248,8 @@ fn DMA1_CH2() {
         // Disable SPI1
         spi1.cr1().modify(|_, w| w.spe().clear_bit());
 
-        // Send initialization commands
-        if let Some(command) = commands.dequeue() {
-            send_command(command, dma1, spi1);
-        } else {
-            // Show response for entered commands
-            // Enable USART2 TX DMA
-            dma1.ch7().cr().modify(|_, w| w.en().set_bit());
-        }
+        // Enable USART2 TX DMA
+        dma1.ch7().cr().modify(|_, w| w.en().set_bit());
     }
 }
 
@@ -371,7 +370,8 @@ fn main() -> ! {
 
     // USART2: Configure baud rate 9600
     dp.USART2.brr().write(|w| unsafe { w.bits(417) }); // 4Mhz / 9600 approx. 417
-                                                       // USART2: enable DMA
+
+    // USART2: enable DMA
     dp.USART2
         .cr3()
         .write(|w| w.dmar().set_bit().dmat().set_bit());
@@ -437,19 +437,19 @@ fn main() -> ! {
     // Enable TIM2 update interrupt
     dp.TIM2.dier().write(|w| w.uie().set_bit());
 
-    // Initial commands
-    let command_queue = COMMANDS.get();
+    // Initialization commands
+    let init_commands = INIT_COMMANDS.get();
 
-    let _ = command_queue.enqueue(&R_RF_CH);
-    let _ = command_queue.enqueue(&W_TX_ADDR);
-    let _ = command_queue.enqueue(&R_TX_ADDR);
-    let _ = command_queue.enqueue(&W_RX_ADDR_P0);
-    let _ = command_queue.enqueue(&R_RX_ADDR_P0);
-    let _ = command_queue.enqueue(&ACTIVATE);
-    let _ = command_queue.enqueue(&W_FEATURE);
-    let _ = command_queue.enqueue(&R_FEATURE);
-    let _ = command_queue.enqueue(&W_CONFIG);
-    let _ = command_queue.enqueue(&R_CONFIG);
+    let _ = init_commands.enqueue(&R_RF_CH);
+    let _ = init_commands.enqueue(&W_TX_ADDR);
+    let _ = init_commands.enqueue(&R_TX_ADDR);
+    let _ = init_commands.enqueue(&W_RX_ADDR_P0);
+    let _ = init_commands.enqueue(&R_RX_ADDR_P0);
+    let _ = init_commands.enqueue(&ACTIVATE);
+    let _ = init_commands.enqueue(&W_FEATURE);
+    let _ = init_commands.enqueue(&R_FEATURE);
+    let _ = init_commands.enqueue(&W_CONFIG);
+    let _ = init_commands.enqueue(&R_CONFIG);
 
     unsafe {
         // Unmask NVIC global interrupts
