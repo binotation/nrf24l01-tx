@@ -102,30 +102,6 @@ unsafe impl<const N: usize> Sync for SyncBuffer<N> {}
 static INIT_COMMANDS: SyncQueue<&[u8], 16> = SyncQueue::new();
 static SPI1_RX_BUFFER: SyncBuffer<33> = SyncBuffer::new();
 
-// struct DualBuffer {
-//     buffer: [[u8; 33]; 2],
-//     writing_to: usize,
-// }
-
-// struct SyncDualBuffer(UnsafeCell<DualBuffer>);
-
-// impl SyncDualBuffer {
-//     const fn new() -> Self {
-//         Self (UnsafeCell::new(
-//             DualBuffer {
-//                 buffer: [[0; 33]; 2],
-//                 writing_to: 0,
-//             }
-//         ))
-//     }
-
-//     const fn get(&self) -> &mut DualBuffer {
-//         unsafe { &mut *self.0.get() }
-//     }
-// }
-
-// unsafe impl Sync for SyncDualBuffer {}
-
 #[inline]
 fn send_command(command: &[u8], dma1: &mut DMA1, spi1: &mut SPI1) {
     // Write memory address
@@ -377,7 +353,7 @@ fn main() -> ! {
         .write(|w| w.dmar().set_bit().dmat().set_bit());
 
     // SPI1: Set FIFO reception threshold to 1/4, data frame size to 8 bits, enable slave select output,
-    // enable RXNE interupt, enable DMA
+    // enable DMA
     dp.SPI1.cr2().write(|w| unsafe {
         w.frxth()
             .set_bit()
@@ -385,8 +361,6 @@ fn main() -> ! {
             .bits(7)
             .ssoe()
             .enabled()
-            .rxneie()
-            .set_bit()
             .txdmaen()
             .set_bit()
             .rxdmaen()
@@ -453,7 +427,6 @@ fn main() -> ! {
 
     unsafe {
         // Unmask NVIC global interrupts
-        // cortex_m::peripheral::NVIC::unmask(Interrupt::SPI1);
         cortex_m::peripheral::NVIC::unmask(Interrupt::USART2);
         cortex_m::peripheral::NVIC::unmask(Interrupt::DMA1_CH2);
         cortex_m::peripheral::NVIC::unmask(Interrupt::DMA1_CH3);
