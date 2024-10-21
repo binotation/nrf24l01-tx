@@ -8,10 +8,10 @@ use cortex_m_rt::entry;
 use heapless::{spsc::Queue, Vec};
 use nrf24l01_commands::{commands, commands::Command, registers};
 use panic_semihosting as _; // logs messages to the host stderr; requires a debugger
-use stm32l4::stm32l4x2::{interrupt, Interrupt, Peripherals, GPIOA, SPI1, TIM2, USART2};
+use stm32l4::stm32l4x2::{interrupt, Interrupt, Peripherals, GPIOA, SPI1, TIM2, USART2, DMA1};
 
 const TX_ADDR: u64 = 0xA2891FFF6A;
-const PAYLOAD: [u8; 32] = [
+static PAYLOAD: [u8; 32] = [
     b't', b'h', b'e', b' ', b'l', b'a', b'z', b'y', b' ', b'f', b'o', b'x', b' ', b'j', b'u', b'm',
     b'p', b'e', b'd', b' ', b'o', b'v', b'e', b'r', b' ', b't', b'h', b'e', b' ', b'b', b'r', b'o',
 ];
@@ -37,6 +37,7 @@ impl<P> SyncUnsafeCell<P> {
 unsafe impl Sync for SyncUnsafeCell<GPIOA> {}
 unsafe impl Sync for SyncUnsafeCell<USART2> {}
 unsafe impl Sync for SyncUnsafeCell<SPI1> {}
+unsafe impl Sync for SyncUnsafeCell<DMA1> {}
 unsafe impl Sync for SyncUnsafeCell<TIM2> {}
 unsafe impl Sync for SyncUnsafeCell<Queue<u8, 64>> {}
 unsafe impl Sync for SyncUnsafeCell<Queue<u16, 64>> {}
@@ -45,6 +46,7 @@ unsafe impl Sync for SyncUnsafeCell<Queue<Vec<u8, 64>, 16>> {}
 static GPIOA_PERIPHERAL: SyncUnsafeCell<GPIOA> = SyncUnsafeCell::new();
 static USART2_PERIPHERAL: SyncUnsafeCell<USART2> = SyncUnsafeCell::new();
 static SPI1_PERIPHERAL: SyncUnsafeCell<SPI1> = SyncUnsafeCell::new();
+static DMA1_PERIPHERAL: SyncUnsafeCell<DMA1> = SyncUnsafeCell::new();
 static TIM2_PERIPHERAL: SyncUnsafeCell<TIM2> = SyncUnsafeCell::new();
 /// Bytes to be transmitted over SPI1
 static TX_BUFFER: SyncUnsafeCell<Queue<u8, 64>> = SyncUnsafeCell::new();
@@ -62,12 +64,12 @@ fn enqueue_command(queue: &mut Queue<Vec<u8, 64>, 16>, command_bytes: &[u8]) {
 
 #[interrupt]
 fn USART2() {
-    let gpioa = GPIOA_PERIPHERAL.get();
+    // let gpioa = GPIOA_PERIPHERAL.get();
     let usart2 = USART2_PERIPHERAL.get();
-    let spi1 = SPI1_PERIPHERAL.get();
-    let tim2 = TIM2_PERIPHERAL.get();
+    // let spi1 = SPI1_PERIPHERAL.get();
+    // let tim2 = TIM2_PERIPHERAL.get();
     let rx_buffer = RX_BUFFER.get();
-    let command_queue = COMMANDS.get();
+    // let command_queue = COMMANDS.get();
 
     // Dequeue bytes off rx buffer and transmit over USART2
     if usart2.isr().read().txe().bit_is_set() {
@@ -83,87 +85,47 @@ fn USART2() {
     }
 
     // Read incoming bytes from USART2 and queue onto tx buffer
-    if usart2.isr().read().rxne().bit_is_set() {
-        // Read data, this clears RXNE
-        let received_byte = usart2.rdr().read().rdr().bits();
+    // if usart2.isr().read().rxne().bit_is_set() {
+    //     // Read data, this clears RXNE
+    //     let received_byte = usart2.rdr().read().rdr().bits();
 
-        match received_byte {
-            97 => {
-                // a
-                // NOP
-                let mut command: Vec<u8, 64> = Vec::new();
-                let _ = command.push(commands::Nop::WORD);
-                let _ = command_queue.enqueue(command);
-            }
-            98 => {
-                // b
-                // Read RF_CH
-                enqueue_command(
-                    command_queue,
-                    &commands::RRegister::<registers::RfCh>::bytes(),
-                );
-            }
-            99 => {
-                // c
-                // Read TX addr
-                enqueue_command(
-                    command_queue,
-                    &commands::RRegister::<registers::TxAddr::<5>>::bytes(),
-                );
-            }
-            100 => {
-                // d
-                // Read RX Addr P0
-                enqueue_command(
-                    command_queue,
-                    &commands::RRegister::<registers::RxAddrP0::<5>>::bytes(),
-                );
-            }
-            101 => {
-                // e
-                // Read feature register
-                enqueue_command(
-                    command_queue,
-                    &commands::RRegister::<registers::Feature>::bytes(),
-                );
-            }
-            102 => {
-                // f
-                // Read Config
-                enqueue_command(
-                    command_queue,
-                    &commands::RRegister::<registers::Config>::bytes(),
-                );
-            }
-            103 => {
-                // g
-                // Write payload
-                enqueue_command(
-                    command_queue,
-                    &commands::WTxPayloadNoack(PAYLOAD).bytes(),
-                );
-            }
-            104 => {
-                // h
-                // pulse CE
-                gpioa.bsrr().write(|w| w.bs0().set_bit());
-                // Enable counter, one-pulse mode
-                tim2.cr1().write(|w| w.opm().enabled().cen().enabled());
-            }
-            105 => {
-                // i
-                // Clear TX_DS flag
-                enqueue_command(
-                    command_queue,
-                    &commands::WRegister(registers::Status::new().with_tx_ds(true)).bytes(),
-                );
-            }
-            _ => (),
-        }
+    //     match received_byte {
+    //         97 => {
+    //             // a
+    //             // NOP
+    //             let mut command: Vec<u8, 64> = Vec::new();
+    //             let _ = command.push(commands::Nop::WORD);
+    //             let _ = command_queue.enqueue(command);
+    //         }
+    //         98 => {
+    //             // b
+    //             // Write payload
+    //             enqueue_command(
+    //                 command_queue,
+    //                 &commands::WTxPayloadNoack(PAYLOAD).bytes(),
+    //             );
+    //         }
+    //         99 => {
+    //             // c
+    //             // pulse CE
+    //             gpioa.bsrr().write(|w| w.bs0().set_bit());
+    //             // Enable counter, one-pulse mode
+    //             tim2.cr1().write(|w| w.opm().enabled().cen().enabled());
+    //         }
+    //         100 => {
+    //             // d
+    //             // Clear TX_DS flag
+    //             enqueue_command(
+    //                 command_queue,
+    //                 &commands::WRegister(registers::Status::new().with_tx_ds(true)).bytes(),
+    //             );
+    //         }
+    //         _ => (),
+    //     }
 
-        spi1.cr2().modify(|_, w| w.txeie().set_bit());
-        spi1.cr1().modify(|_, w| w.spe().enabled());
-    }
+    //     spi1.cr2().modify(|_, w| w.txeie().set_bit());
+    //     spi1.cr1().modify(|_, w| w.spe().enabled());
+    // }
     if usart2.isr().read().ore().bit_is_set() {
         usart2.icr().write(|w| w.orecf().set_bit());
     }
@@ -208,6 +170,7 @@ fn SPI1() {
                         let _ = tx_buffer.enqueue(byte);
                     }
                 } else {
+                    while spi1.sr().read().bsy().bit_is_set() {}
                     spi1.cr1().modify(|_, w| w.spe().disabled());
                     spi1.cr2().modify(|_, w| w.txeie().clear_bit());
                 }
@@ -221,6 +184,14 @@ fn SPI1() {
         if rx_buffer.enqueue(received_byte as u16).is_ok() {
             usart2.cr1().modify(|_, w| w.txeie().enabled());
         }
+    }
+}
+
+#[interrupt]
+fn DMA1_CH6() {
+    let dma1 = DMA1_PERIPHERAL.get();
+    if dma1.isr().read().tcif6().bit_is_set() {
+        dma1.ifcr().write(|w| w.ctcif6().set_bit());
     }
 }
 
@@ -242,6 +213,7 @@ fn main() -> ! {
     let dp = Peripherals::take().unwrap();
 
     // Enable peripheral clocks - GPIOA, USART2
+    dp.RCC.ahb1enr().write(|w| w.dma1en().set_bit());
     dp.RCC.ahb2enr().write(|w| w.gpioaen().set_bit());
     dp.RCC
         .apb1enr1()
@@ -303,8 +275,16 @@ fn main() -> ! {
             .af5()
     });
 
+    dp.DMA1.ch6().par().write(|w| unsafe { w.pa().bits(0x4000_4424) });
+    dp.DMA1.ch6().mar().write(|w| unsafe { w.ma().bits(&PAYLOAD as *const [u8; 32] as u32) });
+    dp.DMA1.ch6().ndtr().write(|w| unsafe { w.bits(32) });
+    dp.DMA1.cselr().write(|w| w.c6s().map2());
+    dp.DMA1.ch6().cr().write(|w| w.minc().set_bit().tcie().set_bit());
+    dp.DMA1.ch6().cr().modify(|_, w| w.en().set_bit());
+
     // USART2: Configure baud rate 9600
     dp.USART2.brr().write(|w| unsafe { w.bits(417) }); // 4Mhz / 9600 approx. 417
+    dp.USART2.cr3().write(|w| w.dmar().set_bit());
 
     // SPI1: Set FIFO reception threshold to 1/4, data frame size to 8 bits, enable slave select output,
     // enable RXNE interupt
@@ -318,10 +298,8 @@ fn main() -> ! {
             .rxneie()
             .set_bit()
     });
-    // SPI1: set baud rate fpclk/8, SPI master
-    dp.SPI1
-        .cr1()
-        .write(|w| unsafe { w.br().bits(2) }.mstr().set_bit());
+    // SPI1: set SPI master
+    dp.SPI1.cr1().write(|w| w.mstr().set_bit());
 
     // Enable USART, transmitter, receiver and RXNE interrupt
     dp.USART2.cr1().write(|w| {
@@ -399,11 +377,13 @@ fn main() -> ! {
         // Unmask NVIC global interrupts
         cortex_m::peripheral::NVIC::unmask(Interrupt::SPI1);
         cortex_m::peripheral::NVIC::unmask(Interrupt::USART2);
+        cortex_m::peripheral::NVIC::unmask(Interrupt::DMA1_CH6);
         cortex_m::peripheral::NVIC::unmask(Interrupt::TIM2)
     }
     GPIOA_PERIPHERAL.set(dp.GPIOA);
     SPI1_PERIPHERAL.set(dp.SPI1);
     USART2_PERIPHERAL.set(dp.USART2);
+    DMA1_PERIPHERAL.set(dp.DMA1);
     TIM2_PERIPHERAL.set(dp.TIM2);
 
     // Enable SPI to send initial commands
