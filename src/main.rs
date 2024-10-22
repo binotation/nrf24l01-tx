@@ -37,11 +37,7 @@ const W_CONFIG: [u8; 2] = commands::WRegister(
 const R_CONFIG: [u8; 2] = commands::RRegister::<registers::Config>::bytes();
 const CLEAR_TX_DS: [u8; 2] = commands::WRegister(registers::Status::new().with_tx_ds(true)).bytes();
 
-static PAYLOAD: [u8; 32] = [
-    b't', b'h', b'e', b' ', b'l', b'a', b'z', b'y', b' ', b'f', b'o', b'x', b' ', b'j', b'u', b'm',
-    b'p', b'e', b'd', b' ', b'o', b'v', b'e', b'r', b' ', b't', b'h', b'e', b' ', b'b', b'r', b'o',
-];
-const W_TX_PL_NOACK: [u8; 33] = commands::WTxPayloadNoack(PAYLOAD).bytes();
+static mut W_TX_PL_NOACK: [u8; 33] = commands::WTxPayloadNoack([0; 32]).bytes();
 
 struct SyncPeripheral<P>(UnsafeCell<Option<P>>);
 
@@ -126,71 +122,23 @@ fn send_command(command: &[u8], dma1: &mut DMA1, spi1: &mut SPI1) {
     spi1.cr1().modify(|_, w| w.spe().enabled());
 }
 
+/// USART2 RX DMA stream
 #[interrupt]
-fn USART2() {
-    let gpioa = GPIOA_PERIPHERAL.get();
-    let usart2 = USART2_PERIPHERAL.get();
-    let spi1 = SPI1_PERIPHERAL.get();
-    let tim2 = TIM2_PERIPHERAL.get();
+fn DMA1_CH6() {
     let dma1 = DMA1_PERIPHERAL.get();
+    let spi1 = SPI1_PERIPHERAL.get();
 
-    // Dequeue bytes off rx buffer and transmit over USART2
-    // if usart2.isr().read().txe().bit_is_set() {
-    //     match rx_buffer.dequeue() {
-    //         Some(byte) => {
-    //             usart2.tdr().write(|w| unsafe { w.tdr().bits(byte) });
-    //             if rx_buffer.is_empty() {
-    //                 usart2.cr1().modify(|_, w| w.txeie().disabled());
-    //             }
-    //         }
-    //         None => usart2.cr1().modify(|_, w| w.txeie().disabled()),
-    //     }
-    // }
+    if dma1.isr().read().tcif6().bit_is_set() {
+        dma1.ch6().cr().modify(|_, w| w.en().clear_bit());
+        dma1.ifcr().write(|w| w.ctcif6().set_bit());
 
-    // Read incoming bytes from USART2 and queue onto tx buffer
-    if usart2.isr().read().rxne().bit_is_set() {
-        // Read data, this clears RXNE
-        let received_byte = usart2.rdr().read().rdr().bits();
-
-        match received_byte {
-            97 => {
-                // a
-                // NOP
-                send_command(&NOP, dma1, spi1);
-            }
-            98 => {
-                // b
-                // Write payload
-                send_command(&W_TX_PL_NOACK, dma1, spi1);
-            }
-            99 => {
-                // c
-                // pulse CE
-                gpioa.bsrr().write(|w| w.bs0().set_bit());
-                // Enable counter, one-pulse mode
-                tim2.cr1().write(|w| w.opm().enabled().cen().enabled());
-            }
-            100 => {
-                // d
-                // Clear TX_DS flag
-                send_command(&CLEAR_TX_DS, dma1, spi1);
-            }
-            _ => (),
-        }
-    }
-    if usart2.isr().read().ore().bit_is_set() {
-        usart2.icr().write(|w| w.orecf().set_bit());
+        // Enable DMA for SPI1 RX, TX
+        dma1.ch2().cr().modify(|_, w| w.en().set_bit());
+        dma1.ch3().cr().modify(|_, w| w.en().set_bit());
+        // Enable SPI1
+        spi1.cr1().modify(|_, w| w.spe().enabled());
     }
 }
-
-// #[interrupt]
-// fn DMA1_CH6() {
-//     let dma1 = DMA1_PERIPHERAL.get();
-//     if dma1.isr().read().tcif6().bit_is_set() {
-//         dma1.ch6().cr().modify(|_, w| w.en().clear_bit());
-//         dma1.ifcr().write(|w| w.ctcif6().set_bit());
-//     }
-// }
 
 /// USART2 TX DMA stream
 #[interrupt]
@@ -206,6 +154,25 @@ fn DMA1_CH7() {
         // Send initialization commands
         if let Some(command) = init_commands.dequeue() {
             send_command(command, dma1, spi1);
+        } else {
+            // Write memory address for SPI1 TX
+            dma1.ch3()
+                .mar()
+                .write(|w| unsafe { w.bits(W_TX_PL_NOACK.as_ptr() as u32) });
+            let transfer_size = 33;
+            // Set DMA transfer size for SPI1 RX, TX, USART2 TX, RX
+            dma1.ch2()
+                .ndtr()
+                .write(|w| unsafe { w.bits(transfer_size) });
+            dma1.ch3()
+                .ndtr()
+                .write(|w| unsafe { w.bits(transfer_size) });
+            dma1.ch7()
+                .ndtr()
+                .write(|w| unsafe { w.bits(transfer_size) });
+            dma1.ch6().ndtr().write(|w| unsafe { w.bits(32) });
+            // Enable DMA for USART2 RX
+            dma1.ch6().cr().modify(|_, w| w.en().set_bit());
         }
     }
 }
@@ -325,10 +292,18 @@ fn main() -> ! {
         .write(|w| w.c2s().map1().c3s().map1().c6s().map2().c7s().map2());
 
     // DMA channel 6 USART2 RX
-    // dp.DMA1.ch6().par().write(|w| unsafe { w.pa().bits(USART2_RDR) });
-    // dp.DMA1.ch6().mar().write(|w| unsafe { w.ma().bits(&PAYLOAD as *const [u8; 32] as u32) });
-    // dp.DMA1.ch6().ndtr().write(|w| unsafe { w.bits(32) });
-    // dp.DMA1.ch6().cr().write(|w| w.minc().set_bit().tcie().set_bit());
+    dp.DMA1
+        .ch6()
+        .par()
+        .write(|w| unsafe { w.pa().bits(USART2_RDR) });
+    dp.DMA1
+        .ch6()
+        .mar()
+        .write(|w| unsafe { w.ma().bits(W_TX_PL_NOACK[1..].as_ptr() as u32) });
+    dp.DMA1
+        .ch6()
+        .cr()
+        .write(|w| w.minc().set_bit().tcie().set_bit());
 
     // DMA channel 7 USART2 TX
     dp.DMA1
@@ -394,16 +369,9 @@ fn main() -> ! {
         .write(|w| w.minc().set_bit().dir().set_bit().tcie().set_bit());
 
     // Enable USART, transmitter, receiver and RXNE interrupt
-    dp.USART2.cr1().write(|w| {
-        w.re()
-            .set_bit()
-            .te()
-            .set_bit()
-            .ue()
-            .set_bit()
-            .rxneie()
-            .set_bit()
-    });
+    dp.USART2
+        .cr1()
+        .write(|w| w.re().set_bit().te().set_bit().ue().set_bit());
 
     // Set 11us interval
     dp.TIM2.arr().write(|w| unsafe { w.arr().bits(44) }); // 44 / 4MHz = 11us
@@ -427,7 +395,6 @@ fn main() -> ! {
 
     unsafe {
         // Unmask NVIC global interrupts
-        cortex_m::peripheral::NVIC::unmask(Interrupt::USART2);
         cortex_m::peripheral::NVIC::unmask(Interrupt::DMA1_CH2);
         cortex_m::peripheral::NVIC::unmask(Interrupt::DMA1_CH3);
         cortex_m::peripheral::NVIC::unmask(Interrupt::DMA1_CH6);
