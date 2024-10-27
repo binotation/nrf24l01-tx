@@ -3,7 +3,7 @@
 
 use core::cell::UnsafeCell;
 use cortex_m_rt::entry;
-use cortex_m_semihosting::hprintln;
+// use cortex_m_semihosting::hprintln;
 use heapless::spsc::Queue;
 use nrf24l01_commands::{commands, registers};
 use panic_semihosting as _; // logs messages to the host stderr; requires a debugger
@@ -18,6 +18,8 @@ const TX_ADDR: u64 = 0xA2891FFF6A;
 const NOP: [u8; 1] = commands::Nop::bytes();
 const W_RF_CH: [u8; 2] = commands::WRegister(registers::RfCh::new().with_rf_ch(110)).bytes();
 const R_RF_CH: [u8; 2] = commands::RRegister::<registers::RfCh>::bytes();
+const W_RF_SETUP: [u8; 2] =
+    commands::WRegister(registers::RfSetup::new().with_rf_dr(false)).bytes();
 const W_TX_ADDR: [u8; 6] =
     commands::WRegister(registers::TxAddr::<5>::new().with_tx_addr(TX_ADDR)).bytes();
 const R_TX_ADDR: [u8; 6] = commands::RRegister::<registers::TxAddr<5>>::bytes();
@@ -35,9 +37,10 @@ const W_CONFIG: [u8; 2] = commands::WRegister(
 )
 .bytes();
 const R_CONFIG: [u8; 2] = commands::RRegister::<registers::Config>::bytes();
-const CLEAR_TX_DS: [u8; 2] = commands::WRegister(registers::Status::new().with_tx_ds(true)).bytes();
+const RESET_TX_DS: [u8; 2] = commands::WRegister(registers::Status::new().with_tx_ds(true)).bytes();
 
 static mut W_TX_PL_NOACK: [u8; 33] = commands::WTxPayloadNoack([0; 32]).bytes();
+static mut SPI1_RX_BUFFER: [u8; 33] = [0; 33];
 
 struct SyncPeripheral<P>(UnsafeCell<Option<P>>);
 
@@ -50,6 +53,7 @@ impl<P> SyncPeripheral<P> {
         unsafe { *self.0.get() = Some(inner) };
     }
 
+    #[allow(clippy::mut_from_ref)]
     const fn get(&self) -> &mut P {
         unsafe { &mut *self.0.get() }.as_mut().unwrap()
     }
@@ -76,27 +80,14 @@ impl<T, const N: usize> SyncQueue<T, N> {
         Self(UnsafeCell::new(Queue::new()))
     }
 
+    #[allow(clippy::mut_from_ref)]
     const fn get(&self) -> &mut Queue<T, N> {
         unsafe { &mut *self.0.get() }
     }
 }
 unsafe impl Sync for SyncQueue<&[u8], 16> {}
 
-struct SyncBuffer<const N: usize>(UnsafeCell<[u8; N]>);
-
-impl<const N: usize> SyncBuffer<N> {
-    const fn new() -> Self {
-        Self(UnsafeCell::new([0; N]))
-    }
-
-    const fn get(&self) -> &mut [u8; N] {
-        unsafe { &mut *self.0.get() }
-    }
-}
-unsafe impl<const N: usize> Sync for SyncBuffer<N> {}
-
-static INIT_COMMANDS: SyncQueue<&[u8], 16> = SyncQueue::new();
-static SPI1_RX_BUFFER: SyncBuffer<33> = SyncBuffer::new();
+static COMMANDS: SyncQueue<&[u8], 16> = SyncQueue::new();
 
 #[inline]
 fn send_command(command: &[u8], dma1: &mut DMA1, spi1: &mut SPI1) {
@@ -144,7 +135,7 @@ fn DMA1_CH6() {
 #[interrupt]
 fn DMA1_CH7() {
     let dma1 = DMA1_PERIPHERAL.get();
-    let init_commands = INIT_COMMANDS.get();
+    let commands = COMMANDS.get();
     let spi1 = SPI1_PERIPHERAL.get();
 
     if dma1.isr().read().tcif7().bit_is_set() {
@@ -152,10 +143,11 @@ fn DMA1_CH7() {
         dma1.ifcr().write(|w| w.ctcif7().set_bit());
 
         // Send initialization commands
-        if let Some(command) = init_commands.dequeue() {
+        if let Some(command) = commands.dequeue() {
             send_command(command, dma1, spi1);
         } else {
             // Write memory address for SPI1 TX
+            #[allow(static_mut_refs)]
             dma1.ch3()
                 .mar()
                 .write(|w| unsafe { w.bits(W_TX_PL_NOACK.as_ptr() as u32) });
@@ -182,7 +174,9 @@ fn DMA1_CH7() {
 fn DMA1_CH2() {
     let dma1 = DMA1_PERIPHERAL.get();
     let spi1 = SPI1_PERIPHERAL.get();
-    let init_commands = INIT_COMMANDS.get();
+    let gpioa = GPIOA_PERIPHERAL.get();
+    let tim2 = TIM2_PERIPHERAL.get();
+    let commands = COMMANDS.get();
 
     if dma1.isr().read().tcif2().bit_is_set() {
         dma1.ch2().cr().modify(|_, w| w.en().clear_bit());
@@ -190,6 +184,14 @@ fn DMA1_CH2() {
 
         // Disable SPI1
         spi1.cr1().modify(|_, w| w.spe().clear_bit());
+
+        // Pulse CE if payload written
+        #[allow(static_mut_refs)]
+        if dma1.ch3().mar().read() == unsafe { W_TX_PL_NOACK.as_ptr() } as u32 {
+            gpioa.bsrr().write(|w| w.bs0().set_bit());
+            // Enable counter, one-pulse mode
+            tim2.cr1().write(|w| w.opm().enabled().cen().enabled());
+        }
 
         // Enable USART2 TX DMA
         dma1.ch7().cr().modify(|_, w| w.en().set_bit());
@@ -259,17 +261,17 @@ fn main() -> ! {
         .write(|w| w.pupdr1().pull_up().pupdr4().pull_up());
     dp.GPIOA.ospeedr().write(|w| {
         w.ospeedr2()
-            .very_high_speed()
+            .medium_speed()
             .ospeedr3()
-            .very_high_speed()
+            .medium_speed()
             .ospeedr4()
-            .very_high_speed()
+            .medium_speed()
             .ospeedr5()
-            .very_high_speed()
+            .medium_speed()
             .ospeedr6()
-            .very_high_speed()
+            .medium_speed()
             .ospeedr7()
-            .very_high_speed()
+            .medium_speed()
     });
     dp.GPIOA.afrl().write(|w| {
         w.afrl2()
@@ -296,6 +298,7 @@ fn main() -> ! {
         .ch6()
         .par()
         .write(|w| unsafe { w.pa().bits(USART2_RDR) });
+    #[allow(static_mut_refs)]
     dp.DMA1
         .ch6()
         .mar()
@@ -310,10 +313,11 @@ fn main() -> ! {
         .ch7()
         .par()
         .write(|w| unsafe { w.pa().bits(USART2_TDR) });
+    #[allow(static_mut_refs)]
     dp.DMA1
         .ch7()
         .mar()
-        .write(|w| unsafe { w.ma().bits(SPI1_RX_BUFFER.get() as *const [u8; 33] as u32) });
+        .write(|w| unsafe { w.ma().bits(SPI1_RX_BUFFER.as_ptr() as u32) });
     dp.DMA1
         .ch7()
         .cr()
@@ -349,10 +353,11 @@ fn main() -> ! {
         .ch2()
         .par()
         .write(|w| unsafe { w.pa().bits(SPI1_DR) });
+    #[allow(static_mut_refs)]
     dp.DMA1
         .ch2()
         .mar()
-        .write(|w| unsafe { w.ma().bits(SPI1_RX_BUFFER.get() as *const [u8; 33] as u32) });
+        .write(|w| unsafe { w.ma().bits(SPI1_RX_BUFFER.as_ptr() as u32) });
     dp.DMA1
         .ch2()
         .cr()
@@ -380,18 +385,19 @@ fn main() -> ! {
     dp.TIM2.dier().write(|w| w.uie().set_bit());
 
     // Initialization commands
-    let init_commands = INIT_COMMANDS.get();
+    let commands = COMMANDS.get();
 
-    let _ = init_commands.enqueue(&R_RF_CH);
-    let _ = init_commands.enqueue(&W_TX_ADDR);
-    let _ = init_commands.enqueue(&R_TX_ADDR);
-    let _ = init_commands.enqueue(&W_RX_ADDR_P0);
-    let _ = init_commands.enqueue(&R_RX_ADDR_P0);
-    let _ = init_commands.enqueue(&ACTIVATE);
-    let _ = init_commands.enqueue(&W_FEATURE);
-    let _ = init_commands.enqueue(&R_FEATURE);
-    let _ = init_commands.enqueue(&W_CONFIG);
-    let _ = init_commands.enqueue(&R_CONFIG);
+    let _ = commands.enqueue(&W_RF_SETUP);
+    let _ = commands.enqueue(&R_RF_CH);
+    let _ = commands.enqueue(&W_TX_ADDR);
+    let _ = commands.enqueue(&R_TX_ADDR);
+    let _ = commands.enqueue(&W_RX_ADDR_P0);
+    let _ = commands.enqueue(&R_RX_ADDR_P0);
+    let _ = commands.enqueue(&ACTIVATE);
+    let _ = commands.enqueue(&W_FEATURE);
+    let _ = commands.enqueue(&R_FEATURE);
+    let _ = commands.enqueue(&W_CONFIG);
+    let _ = commands.enqueue(&R_CONFIG);
 
     unsafe {
         // Unmask NVIC global interrupts
