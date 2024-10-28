@@ -226,11 +226,11 @@ fn main() -> ! {
         .write(|w| w.pupdr1().pull_up().pupdr4().pull_up());
     dp.GPIOA.ospeedr().write(|w| {
         w.ospeedr2()
-            .medium_speed()
+            .low_speed()
             .ospeedr3()
-            .medium_speed()
+            .low_speed()
             .ospeedr4()
-            .medium_speed()
+            .low_speed()
             .ospeedr5()
             .medium_speed()
             .ospeedr6()
@@ -307,11 +307,10 @@ fn main() -> ! {
     // USART2: Configure baud rate 9600
     dp.USART2.brr().write(|w| unsafe { w.bits(417) }); // 4Mhz / 9600 approx. 417
 
-    // USART2: enable DMA
+    // USART2: enable DMA RX
     dp.USART2.cr3().write(|w| w.dmar().set_bit());
 
-    // SPI1: Set FIFO reception threshold to 1/4, data frame size to 8 bits, enable slave select output,
-    // enable DMA
+    // SPI1: Set FIFO reception threshold to 1/4, enable slave select output, enable DMA
     dp.SPI1.cr2().write(|w| {
         w.frxth()
             .set_bit()
@@ -325,7 +324,7 @@ fn main() -> ! {
     // SPI1: set SPI master
     dp.SPI1.cr1().write(|w| w.mstr().set_bit());
 
-    // Enable USART, transmitter, receiver and RXNE interrupt
+    // Enable USART, receiver
     dp.USART2.cr1().write(|w| w.re().set_bit().ue().set_bit());
 
     // Initialization commands
