@@ -10,37 +10,32 @@ use panic_semihosting as _; // logs messages to the host stderr; requires a debu
 use stm32l4::stm32l4x2::{interrupt, Interrupt, Peripherals, DMA1, GPIOA, SPI1, TIM2, USART2};
 
 const USART2_RDR: u32 = 0x4000_4424;
-const USART2_TDR: u32 = 0x4000_4428;
 const SPI1_DR: u32 = 0x4001_300C;
 const TX_ADDR: u64 = 0xA2891FFF6A;
 
 // Commands
 const NOP: [u8; 1] = commands::Nop::bytes();
 const W_RF_CH: [u8; 2] = commands::WRegister(registers::RfCh::new().with_rf_ch(110)).bytes();
-const R_RF_CH: [u8; 2] = commands::RRegister::<registers::RfCh>::bytes();
 const W_RF_SETUP: [u8; 2] =
     commands::WRegister(registers::RfSetup::new().with_rf_dr(false)).bytes();
 const W_TX_ADDR: [u8; 6] =
     commands::WRegister(registers::TxAddr::<5>::new().with_tx_addr(TX_ADDR)).bytes();
-const R_TX_ADDR: [u8; 6] = commands::RRegister::<registers::TxAddr<5>>::bytes();
 const W_RX_ADDR_P0: [u8; 6] =
     commands::WRegister(registers::RxAddrP0::<5>::new().with_rx_addr_p0(TX_ADDR)).bytes();
-const R_RX_ADDR_P0: [u8; 6] = commands::RRegister::<registers::RxAddrP0<5>>::bytes();
 const ACTIVATE: [u8; 2] = commands::Activate::bytes();
 const W_FEATURE: [u8; 2] =
     commands::WRegister(registers::Feature::new().with_en_dyn_ack(true)).bytes();
-const R_FEATURE: [u8; 2] = commands::RRegister::<registers::Feature>::bytes();
 const W_CONFIG: [u8; 2] = commands::WRegister(
     registers::Config::new()
         .with_pwr_up(true)
         .with_mask_rx_dr(true),
 )
 .bytes();
-const R_CONFIG: [u8; 2] = commands::RRegister::<registers::Config>::bytes();
 const RESET_TX_DS: [u8; 2] = commands::WRegister(registers::Status::new().with_tx_ds(true)).bytes();
 
 static mut W_TX_PL_NOACK: [u8; 33] = commands::WTxPayloadNoack([0; 32]).bytes();
 static mut SPI1_RX_BUFFER: [u8; 33] = [0; 33];
+static mut INIT_COMPLETE: bool = false;
 
 struct SyncPeripheral<P>(UnsafeCell<Option<P>>);
 
@@ -91,21 +86,19 @@ static COMMANDS: SyncQueue<&[u8], 16> = SyncQueue::new();
 
 #[inline]
 fn send_command(command: &[u8], dma1: &mut DMA1, spi1: &mut SPI1) {
-    // Write memory address
+    // Write memory address for SPI1 TX
     dma1.ch3()
         .mar()
         .write(|w| unsafe { w.bits(command.as_ptr() as u32) });
     let transfer_size = command.len() as u32;
-    // Set DMA transfer size for SPI1 RX, TX, USART2 TX
+    // Set DMA transfer size for SPI1 RX, TX
     dma1.ch2()
         .ndtr()
         .write(|w| unsafe { w.bits(transfer_size) });
     dma1.ch3()
         .ndtr()
         .write(|w| unsafe { w.bits(transfer_size) });
-    dma1.ch7()
-        .ndtr()
-        .write(|w| unsafe { w.bits(transfer_size) });
+
     // Enable DMA for SPI1 RX, TX
     dma1.ch2().cr().modify(|_, w| w.en().set_bit());
     dma1.ch3().cr().modify(|_, w| w.en().set_bit());
@@ -113,7 +106,7 @@ fn send_command(command: &[u8], dma1: &mut DMA1, spi1: &mut SPI1) {
     spi1.cr1().modify(|_, w| w.spe().enabled());
 }
 
-/// USART2 RX DMA stream
+/// USART2 RX DMA
 #[interrupt]
 fn DMA1_CH6() {
     let dma1 = DMA1_PERIPHERAL.get();
@@ -123,55 +116,17 @@ fn DMA1_CH6() {
         dma1.ch6().cr().modify(|_, w| w.en().clear_bit());
         dma1.ifcr().write(|w| w.ctcif6().set_bit());
 
-        // Enable DMA for SPI1 RX, TX
-        dma1.ch2().cr().modify(|_, w| w.en().set_bit());
-        dma1.ch3().cr().modify(|_, w| w.en().set_bit());
-        // Enable SPI1
-        spi1.cr1().modify(|_, w| w.spe().enabled());
+        #[allow(static_mut_refs)]
+        send_command(unsafe { &W_TX_PL_NOACK }, dma1, spi1);
     }
 }
 
-/// USART2 TX DMA stream
-#[interrupt]
-fn DMA1_CH7() {
-    let dma1 = DMA1_PERIPHERAL.get();
-    let commands = COMMANDS.get();
-    let spi1 = SPI1_PERIPHERAL.get();
-
-    if dma1.isr().read().tcif7().bit_is_set() {
-        dma1.ch7().cr().modify(|_, w| w.en().clear_bit());
-        dma1.ifcr().write(|w| w.ctcif7().set_bit());
-
-        // Send initialization commands
-        if let Some(command) = commands.dequeue() {
-            send_command(command, dma1, spi1);
-        } else {
-            // Write memory address for SPI1 TX
-            #[allow(static_mut_refs)]
-            dma1.ch3()
-                .mar()
-                .write(|w| unsafe { w.bits(W_TX_PL_NOACK.as_ptr() as u32) });
-            let transfer_size = 33;
-            // Set DMA transfer size for SPI1 RX, TX, USART2 TX, RX
-            dma1.ch2()
-                .ndtr()
-                .write(|w| unsafe { w.bits(transfer_size) });
-            dma1.ch3()
-                .ndtr()
-                .write(|w| unsafe { w.bits(transfer_size) });
-            dma1.ch7()
-                .ndtr()
-                .write(|w| unsafe { w.bits(transfer_size) });
-            dma1.ch6().ndtr().write(|w| unsafe { w.bits(32) });
-            // Enable DMA for USART2 RX
-            dma1.ch6().cr().modify(|_, w| w.en().set_bit());
-        }
-    }
-}
-
-/// SPI1 RX DMA stream
+/// SPI1 RX DMA
 #[interrupt]
 fn DMA1_CH2() {
+    #[allow(static_mut_refs)]
+    let init_complete = unsafe { &mut INIT_COMPLETE };
+
     let dma1 = DMA1_PERIPHERAL.get();
     let spi1 = SPI1_PERIPHERAL.get();
     let gpioa = GPIOA_PERIPHERAL.get();
@@ -191,14 +146,24 @@ fn DMA1_CH2() {
             gpioa.bsrr().write(|w| w.bs0().set_bit());
             // Enable counter, one-pulse mode
             tim2.cr1().write(|w| w.opm().enabled().cen().enabled());
+            // Read next payload
+            dma1.ch6().ndtr().write(|w| unsafe { w.bits(32) });
+            dma1.ch6().cr().modify(|_, w| w.en().set_bit());
         }
 
-        // Enable USART2 TX DMA
-        dma1.ch7().cr().modify(|_, w| w.en().set_bit());
+        // Send next command
+        if let Some(command) = commands.dequeue() {
+            send_command(command, dma1, spi1);
+            if !*init_complete && commands.is_empty() {
+                *init_complete = true;
+                dma1.ch6().ndtr().write(|w| unsafe { w.bits(32) });
+                dma1.ch6().cr().modify(|_, w| w.en().set_bit());
+            }
+        }
     }
 }
 
-/// SPI1 TX DMA stream
+/// SPI1 TX DMA
 #[interrupt]
 fn DMA1_CH3() {
     let dma1 = DMA1_PERIPHERAL.get();
@@ -291,7 +256,7 @@ fn main() -> ! {
     // DMA channel selection
     dp.DMA1
         .cselr()
-        .write(|w| w.c2s().map1().c3s().map1().c6s().map2().c7s().map2());
+        .write(|w| w.c2s().map1().c3s().map1().c6s().map2());
 
     // DMA channel 6 USART2 RX
     dp.DMA1
@@ -307,46 +272,6 @@ fn main() -> ! {
         .ch6()
         .cr()
         .write(|w| w.minc().set_bit().tcie().set_bit());
-
-    // DMA channel 7 USART2 TX
-    dp.DMA1
-        .ch7()
-        .par()
-        .write(|w| unsafe { w.pa().bits(USART2_TDR) });
-    #[allow(static_mut_refs)]
-    dp.DMA1
-        .ch7()
-        .mar()
-        .write(|w| unsafe { w.ma().bits(SPI1_RX_BUFFER.as_ptr() as u32) });
-    dp.DMA1
-        .ch7()
-        .cr()
-        .write(|w| w.minc().set_bit().tcie().set_bit().dir().set_bit());
-
-    // USART2: Configure baud rate 9600
-    dp.USART2.brr().write(|w| unsafe { w.bits(417) }); // 4Mhz / 9600 approx. 417
-
-    // USART2: enable DMA
-    dp.USART2
-        .cr3()
-        .write(|w| w.dmar().set_bit().dmat().set_bit());
-
-    // SPI1: Set FIFO reception threshold to 1/4, data frame size to 8 bits, enable slave select output,
-    // enable DMA
-    dp.SPI1.cr2().write(|w| unsafe {
-        w.frxth()
-            .set_bit()
-            .ds()
-            .bits(7)
-            .ssoe()
-            .enabled()
-            .txdmaen()
-            .set_bit()
-            .rxdmaen()
-            .set_bit()
-    });
-    // SPI1: set SPI master
-    dp.SPI1.cr1().write(|w| w.mstr().set_bit());
 
     // DMA channel 2 SPI1 RX
     dp.DMA1
@@ -373,38 +298,51 @@ fn main() -> ! {
         .cr()
         .write(|w| w.minc().set_bit().dir().set_bit().tcie().set_bit());
 
-    // Enable USART, transmitter, receiver and RXNE interrupt
-    dp.USART2
-        .cr1()
-        .write(|w| w.re().set_bit().te().set_bit().ue().set_bit());
-
     // Set 11us interval
     dp.TIM2.arr().write(|w| unsafe { w.arr().bits(44) }); // 44 / 4MHz = 11us
 
     // Enable TIM2 update interrupt
     dp.TIM2.dier().write(|w| w.uie().set_bit());
 
+    // USART2: Configure baud rate 9600
+    dp.USART2.brr().write(|w| unsafe { w.bits(417) }); // 4Mhz / 9600 approx. 417
+
+    // USART2: enable DMA
+    dp.USART2.cr3().write(|w| w.dmar().set_bit());
+
+    // SPI1: Set FIFO reception threshold to 1/4, data frame size to 8 bits, enable slave select output,
+    // enable DMA
+    dp.SPI1.cr2().write(|w| {
+        w.frxth()
+            .set_bit()
+            .ssoe()
+            .enabled()
+            .txdmaen()
+            .set_bit()
+            .rxdmaen()
+            .set_bit()
+    });
+    // SPI1: set SPI master
+    dp.SPI1.cr1().write(|w| w.mstr().set_bit());
+
+    // Enable USART, transmitter, receiver and RXNE interrupt
+    dp.USART2.cr1().write(|w| w.re().set_bit().ue().set_bit());
+
     // Initialization commands
     let commands = COMMANDS.get();
 
-    let _ = commands.enqueue(&W_RF_SETUP);
-    let _ = commands.enqueue(&R_RF_CH);
-    let _ = commands.enqueue(&W_TX_ADDR);
-    let _ = commands.enqueue(&R_TX_ADDR);
-    let _ = commands.enqueue(&W_RX_ADDR_P0);
-    let _ = commands.enqueue(&R_RX_ADDR_P0);
-    let _ = commands.enqueue(&ACTIVATE);
-    let _ = commands.enqueue(&W_FEATURE);
-    let _ = commands.enqueue(&R_FEATURE);
-    let _ = commands.enqueue(&W_CONFIG);
-    let _ = commands.enqueue(&R_CONFIG);
-
     unsafe {
+        commands.enqueue_unchecked(&W_RF_SETUP);
+        commands.enqueue_unchecked(&W_TX_ADDR);
+        commands.enqueue_unchecked(&W_RX_ADDR_P0);
+        commands.enqueue_unchecked(&ACTIVATE);
+        commands.enqueue_unchecked(&W_FEATURE);
+        commands.enqueue_unchecked(&W_CONFIG);
+
         // Unmask NVIC global interrupts
         cortex_m::peripheral::NVIC::unmask(Interrupt::DMA1_CH2);
         cortex_m::peripheral::NVIC::unmask(Interrupt::DMA1_CH3);
         cortex_m::peripheral::NVIC::unmask(Interrupt::DMA1_CH6);
-        cortex_m::peripheral::NVIC::unmask(Interrupt::DMA1_CH7);
         cortex_m::peripheral::NVIC::unmask(Interrupt::TIM2)
     }
     GPIOA_PERIPHERAL.set(dp.GPIOA);
