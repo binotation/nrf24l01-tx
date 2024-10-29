@@ -8,7 +8,9 @@ use cortex_m_rt::entry;
 use heapless::spsc::Queue;
 use nrf24l01_commands::{commands, registers};
 use panic_semihosting as _; // logs messages to the host stderr; requires a debugger
-use stm32l4::stm32l4x2::{interrupt, Interrupt, Peripherals, DMA1, GPIOA, SPI1, TIM2, USART2};
+use stm32l4::stm32l4x2::{
+    interrupt, Interrupt, Peripherals, DMA1, EXTI, GPIOA, SPI1, TIM2, USART2,
+};
 
 const USART2_RDR: u32 = 0x4000_4424;
 const SPI1_DR: u32 = 0x4001_300C;
@@ -23,9 +25,6 @@ const W_TX_ADDR: [u8; 6] =
     commands::WRegister(registers::TxAddr::<5>::new().with_tx_addr(TX_ADDR)).bytes();
 const W_RX_ADDR_P0: [u8; 6] =
     commands::WRegister(registers::RxAddrP0::<5>::new().with_rx_addr_p0(TX_ADDR)).bytes();
-const ACTIVATE: [u8; 2] = commands::Activate::bytes();
-const W_FEATURE: [u8; 2] =
-    commands::WRegister(registers::Feature::new().with_en_dyn_ack(true)).bytes();
 const W_CONFIG: [u8; 2] = commands::WRegister(
     registers::Config::new()
         .with_pwr_up(true)
@@ -34,7 +33,7 @@ const W_CONFIG: [u8; 2] = commands::WRegister(
 .bytes();
 const RESET_TX_DS: [u8; 2] = commands::WRegister(registers::Status::new().with_tx_ds(true)).bytes();
 
-static mut W_TX_PL_NOACK: [u8; 33] = commands::WTxPayloadNoack([0; 32]).bytes();
+static mut W_TX_PAYLOAD: [u8; 33] = commands::WTxPayload([0; 32]).bytes();
 static mut SPI1_RX_BUFFER: [u8; 33] = [0; 33];
 static mut INIT_COMPLETE: bool = false;
 
@@ -61,12 +60,14 @@ unsafe impl Sync for SyncPeripheral<GPIOA> {}
 unsafe impl Sync for SyncPeripheral<USART2> {}
 unsafe impl Sync for SyncPeripheral<SPI1> {}
 unsafe impl Sync for SyncPeripheral<DMA1> {}
+unsafe impl Sync for SyncPeripheral<EXTI> {}
 unsafe impl Sync for SyncPeripheral<TIM2> {}
 
 static GPIOA_PERIPHERAL: SyncPeripheral<GPIOA> = SyncPeripheral::new();
 static USART2_PERIPHERAL: SyncPeripheral<USART2> = SyncPeripheral::new();
 static SPI1_PERIPHERAL: SyncPeripheral<SPI1> = SyncPeripheral::new();
 static DMA1_PERIPHERAL: SyncPeripheral<DMA1> = SyncPeripheral::new();
+static EXTI_PERIPHERAL: SyncPeripheral<EXTI> = SyncPeripheral::new();
 static TIM2_PERIPHERAL: SyncPeripheral<TIM2> = SyncPeripheral::new();
 
 struct SyncQueue<T, const N: usize>(UnsafeCell<Queue<T, N>>);
@@ -118,7 +119,7 @@ fn DMA1_CH6() {
         dma1.ifcr().write(|w| w.ctcif6().set_bit());
 
         #[allow(static_mut_refs)]
-        send_command(unsafe { &W_TX_PL_NOACK }, dma1, spi1);
+        send_command(unsafe { &W_TX_PAYLOAD }, dma1, spi1);
     }
 }
 
@@ -143,7 +144,7 @@ fn DMA1_CH2() {
 
         // Pulse CE if payload written
         #[allow(static_mut_refs)]
-        if dma1.ch3().mar().read() == unsafe { W_TX_PL_NOACK.as_ptr() } as u32 {
+        if dma1.ch3().mar().read() == unsafe { W_TX_PAYLOAD.as_ptr() } as u32 {
             gpioa.bsrr().write(|w| w.bs0().set_bit());
             // Enable counter, one-pulse mode
             tim2.cr1().write(|w| w.opm().enabled().cen().enabled());
@@ -171,6 +172,23 @@ fn DMA1_CH3() {
     if dma1.isr().read().tcif3().bit_is_set() {
         dma1.ch3().cr().modify(|_, w| w.en().clear_bit());
         dma1.ifcr().write(|w| w.ctcif3().set_bit());
+    }
+}
+
+#[interrupt]
+fn EXTI1() {
+    let dma1 = DMA1_PERIPHERAL.get();
+    let spi1 = SPI1_PERIPHERAL.get();
+    let exti = EXTI_PERIPHERAL.get();
+    let commands = COMMANDS.get();
+
+    if exti.pr1().read().pr1().bit_is_set() {
+        if dma1.ch2().cr().read().en().bit_is_set() {
+            let _ = commands.enqueue(&RESET_TX_DS);
+        } else {
+            send_command(&RESET_TX_DS, dma1, spi1);
+        }
+        exti.pr1().write(|w| w.pr1().clear_bit_by_one());
     }
 }
 
@@ -254,6 +272,10 @@ fn main() -> ! {
             .af5()
     });
 
+    // EXTI
+    dp.EXTI.ftsr1().write(|w| w.tr1().set_bit());
+    dp.EXTI.imr1().write(|w| w.mr1().set_bit());
+
     // DMA channel selection
     dp.DMA1
         .cselr()
@@ -268,7 +290,7 @@ fn main() -> ! {
     dp.DMA1
         .ch6()
         .mar()
-        .write(|w| unsafe { w.ma().bits(W_TX_PL_NOACK[1..].as_ptr() as u32) });
+        .write(|w| unsafe { w.ma().bits(W_TX_PAYLOAD[1..].as_ptr() as u32) });
     dp.DMA1
         .ch6()
         .cr()
@@ -335,20 +357,20 @@ fn main() -> ! {
         commands.enqueue_unchecked(&W_RF_SETUP);
         commands.enqueue_unchecked(&W_TX_ADDR);
         commands.enqueue_unchecked(&W_RX_ADDR_P0);
-        commands.enqueue_unchecked(&ACTIVATE);
-        commands.enqueue_unchecked(&W_FEATURE);
         commands.enqueue_unchecked(&W_CONFIG);
 
         // Unmask NVIC global interrupts
         cortex_m::peripheral::NVIC::unmask(Interrupt::DMA1_CH2);
         cortex_m::peripheral::NVIC::unmask(Interrupt::DMA1_CH3);
         cortex_m::peripheral::NVIC::unmask(Interrupt::DMA1_CH6);
+        cortex_m::peripheral::NVIC::unmask(Interrupt::EXTI1);
         cortex_m::peripheral::NVIC::unmask(Interrupt::TIM2)
     }
     GPIOA_PERIPHERAL.set(dp.GPIOA);
     SPI1_PERIPHERAL.set(dp.SPI1);
     USART2_PERIPHERAL.set(dp.USART2);
     DMA1_PERIPHERAL.set(dp.DMA1);
+    EXTI_PERIPHERAL.set(dp.EXTI);
     TIM2_PERIPHERAL.set(dp.TIM2);
 
     let dma1 = DMA1_PERIPHERAL.get();
