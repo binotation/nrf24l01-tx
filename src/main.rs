@@ -2,6 +2,7 @@
 #![no_main]
 
 use core::cell::UnsafeCell;
+use cortex_m::asm;
 use cortex_m_rt::entry;
 // use cortex_m_semihosting::hprintln;
 use heapless::spsc::Queue;
@@ -356,5 +357,7 @@ fn main() -> ! {
     send_command(&W_RF_CH, dma1, spi1);
 
     #[allow(clippy::empty_loop)]
-    loop {}
+    loop {
+        asm::wfi();
+    }
 }
