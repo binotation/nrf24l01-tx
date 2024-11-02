@@ -209,6 +209,11 @@ fn main() -> ! {
 
     let dp = Peripherals::take().unwrap();
 
+    // Set system clock speed to 200 khz
+    dp.RCC
+        .cr()
+        .write(|w| w.msirange().range200k().msirgsel().set_bit());
+
     // Enable peripheral clocks: DMA1, GPIOA, USART2, TIM2, SPI1
     dp.RCC.ahb1enr().write(|w| w.dma1en().set_bit());
     dp.RCC.ahb2enr().write(|w| w.gpioaen().set_bit());
@@ -322,13 +327,13 @@ fn main() -> ! {
         .write(|w| w.minc().set_bit().dir().set_bit().tcie().set_bit());
 
     // Set 11us interval
-    dp.TIM2.arr().write(|w| unsafe { w.arr().bits(44) }); // 44 / 4MHz = 11us
+    dp.TIM2.arr().write(|w| unsafe { w.arr().bits(3) }); // 200khz * 11us approx. 3
 
     // Enable TIM2 update interrupt
     dp.TIM2.dier().write(|w| w.uie().set_bit());
 
     // USART2: Configure baud rate 9600
-    dp.USART2.brr().write(|w| unsafe { w.bits(417) }); // 4Mhz / 9600 approx. 417
+    dp.USART2.brr().write(|w| unsafe { w.bits(21) }); // 200khz / 9600 approx. 21
 
     // USART2: enable DMA RX
     dp.USART2.cr3().write(|w| w.dmar().set_bit());
