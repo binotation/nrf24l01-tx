@@ -1,11 +1,11 @@
 #![no_std]
 #![no_main]
 
-use core::cell::UnsafeCell;
 use cortex_m::asm;
 use cortex_m_rt::entry;
+use nrf24l01_tx::sync_cell::{SyncPeripheral, SyncQueue, SyncState};
+use nrf24l01_tx::State;
 // use cortex_m_semihosting::hprintln;
-use heapless::spsc::Queue;
 use nrf24l01_commands::{commands, registers};
 use panic_semihosting as _; // logs messages to the host stderr; requires a debugger
 use stm32l4::stm32l4x2::{
@@ -15,6 +15,13 @@ use stm32l4::stm32l4x2::{
 const USART2_RDR: u32 = 0x4000_4424;
 const SPI1_DR: u32 = 0x4001_300C;
 const TX_ADDR: u64 = 0xA2891FFF6A;
+
+static GPIOA_PERIPHERAL: SyncPeripheral<GPIOA> = SyncPeripheral::new();
+static USART2_PERIPHERAL: SyncPeripheral<USART2> = SyncPeripheral::new();
+static SPI1_PERIPHERAL: SyncPeripheral<SPI1> = SyncPeripheral::new();
+static DMA1_PERIPHERAL: SyncPeripheral<DMA1> = SyncPeripheral::new();
+static EXTI_PERIPHERAL: SyncPeripheral<EXTI> = SyncPeripheral::new();
+static TIM2_PERIPHERAL: SyncPeripheral<TIM2> = SyncPeripheral::new();
 
 // Commands
 const NOP: [u8; 1] = commands::Nop::bytes();
@@ -32,59 +39,12 @@ const W_CONFIG: [u8; 2] = commands::WRegister(
 )
 .bytes();
 const RESET_TX_DS: [u8; 2] = commands::WRegister(registers::Status::new().with_tx_ds(true)).bytes();
+const HANDSHAKE: [u8; 33] = commands::WTxPayload([0; 32]).bytes();
 
 static mut W_TX_PAYLOAD: [u8; 33] = commands::WTxPayload([0; 32]).bytes();
 static mut SPI1_RX_BUFFER: [u8; 33] = [0; 33];
-static mut INIT_COMPLETE: bool = false;
-
-struct SyncPeripheral<P>(UnsafeCell<Option<P>>);
-
-impl<P> SyncPeripheral<P> {
-    const fn new() -> Self {
-        SyncPeripheral(UnsafeCell::new(None))
-    }
-
-    fn set(&self, inner: P) {
-        unsafe { *self.0.get() = Some(inner) };
-    }
-
-    #[allow(clippy::mut_from_ref)]
-    const fn get(&self) -> &mut P {
-        unsafe { &mut *self.0.get() }.as_mut().unwrap()
-    }
-}
-
-// SAFETY: CPU is single-threaded. Interrupts cannot execute simultaneously and cannot
-// preempt each other (all interrupts have same priority).
-unsafe impl Sync for SyncPeripheral<GPIOA> {}
-unsafe impl Sync for SyncPeripheral<USART2> {}
-unsafe impl Sync for SyncPeripheral<SPI1> {}
-unsafe impl Sync for SyncPeripheral<DMA1> {}
-unsafe impl Sync for SyncPeripheral<EXTI> {}
-unsafe impl Sync for SyncPeripheral<TIM2> {}
-
-static GPIOA_PERIPHERAL: SyncPeripheral<GPIOA> = SyncPeripheral::new();
-static USART2_PERIPHERAL: SyncPeripheral<USART2> = SyncPeripheral::new();
-static SPI1_PERIPHERAL: SyncPeripheral<SPI1> = SyncPeripheral::new();
-static DMA1_PERIPHERAL: SyncPeripheral<DMA1> = SyncPeripheral::new();
-static EXTI_PERIPHERAL: SyncPeripheral<EXTI> = SyncPeripheral::new();
-static TIM2_PERIPHERAL: SyncPeripheral<TIM2> = SyncPeripheral::new();
-
-struct SyncQueue<T, const N: usize>(UnsafeCell<Queue<T, N>>);
-
-impl<T, const N: usize> SyncQueue<T, N> {
-    const fn new() -> Self {
-        Self(UnsafeCell::new(Queue::new()))
-    }
-
-    #[allow(clippy::mut_from_ref)]
-    const fn get(&self) -> &mut Queue<T, N> {
-        unsafe { &mut *self.0.get() }
-    }
-}
-unsafe impl Sync for SyncQueue<&[u8], 16> {}
-
 static COMMANDS: SyncQueue<&[u8], 16> = SyncQueue::new();
+static STATE: SyncState = SyncState::new();
 
 #[inline]
 fn send_command(command: &[u8], dma1: &mut DMA1, spi1: &mut SPI1) {
@@ -127,7 +87,7 @@ fn DMA1_CH6() {
 #[interrupt]
 fn DMA1_CH2() {
     #[allow(static_mut_refs)]
-    let init_complete = unsafe { &mut INIT_COMPLETE };
+    let state = STATE.get();
 
     let dma1 = DMA1_PERIPHERAL.get();
     let spi1 = SPI1_PERIPHERAL.get();
@@ -156,8 +116,8 @@ fn DMA1_CH2() {
         // Send next command
         if let Some(command) = commands.dequeue() {
             send_command(command, dma1, spi1);
-            if !*init_complete && commands.is_empty() {
-                *init_complete = true;
+            if *state == State::Init && commands.is_empty() {
+                *state = State::Handshake;
                 dma1.ch6().ndtr().write(|w| unsafe { w.bits(32) });
                 dma1.ch6().cr().modify(|_, w| w.en().set_bit());
             }
