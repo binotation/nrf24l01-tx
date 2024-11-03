@@ -2,4 +2,5 @@
 pub enum State {
     Init,
     Handshake,
+    Connected,
 }
