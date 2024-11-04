@@ -1,8 +1,8 @@
 use crate::state::State;
 use core::cell::UnsafeCell;
-use cortex_m::Peripherals;
+use cortex_m::Peripherals as CorePeripherals;
 use heapless::spsc::Queue;
-use stm32l4::stm32l4x2::{DMA1, EXTI, GPIOA, PWR, SPI1, TIM2, USART2};
+use stm32l4::stm32l4x2::Peripherals as DevicePeripherals;
 
 pub struct SyncPeripheral<P>(UnsafeCell<Option<P>>);
 
@@ -23,14 +23,8 @@ impl<P> SyncPeripheral<P> {
 
 // SAFETY: CPU is single-threaded. Interrupts cannot execute simultaneously and cannot
 // preempt each other (all interrupts have same priority).
-unsafe impl Sync for SyncPeripheral<GPIOA> {}
-unsafe impl Sync for SyncPeripheral<PWR> {}
-unsafe impl Sync for SyncPeripheral<USART2> {}
-unsafe impl Sync for SyncPeripheral<SPI1> {}
-unsafe impl Sync for SyncPeripheral<DMA1> {}
-unsafe impl Sync for SyncPeripheral<EXTI> {}
-unsafe impl Sync for SyncPeripheral<TIM2> {}
-unsafe impl Sync for SyncPeripheral<Peripherals> {}
+unsafe impl Sync for SyncPeripheral<CorePeripherals> {}
+unsafe impl Sync for SyncPeripheral<DevicePeripherals> {}
 
 pub struct SyncQueue<T, const N: usize>(UnsafeCell<Queue<T, N>>);
 

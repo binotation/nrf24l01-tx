@@ -8,22 +8,14 @@ use nrf24l01_tx::State;
 // use cortex_m_semihosting::hprintln;
 use nrf24l01_commands::{commands, registers};
 use panic_semihosting as _; // logs messages to the host stderr; requires a debugger
-use stm32l4::stm32l4x2::{
-    interrupt, Interrupt, Peripherals, DMA1, EXTI, GPIOA, PWR, SPI1, TIM2, USART2,
-};
+use stm32l4::stm32l4x2::{interrupt, Interrupt, Peripherals as DevicePeripherals};
 
 const USART2_RDR: u32 = 0x4000_4424;
 const SPI1_DR: u32 = 0x4001_300C;
 const TX_ADDR: u64 = 0xA2891FFF6A;
 
 static CORE_PERIPHERALS: SyncPeripheral<CorePeripherals> = SyncPeripheral::new();
-static PWR_PERIPHERAL: SyncPeripheral<PWR> = SyncPeripheral::new();
-static GPIOA_PERIPHERAL: SyncPeripheral<GPIOA> = SyncPeripheral::new();
-static USART2_PERIPHERAL: SyncPeripheral<USART2> = SyncPeripheral::new();
-static SPI1_PERIPHERAL: SyncPeripheral<SPI1> = SyncPeripheral::new();
-static DMA1_PERIPHERAL: SyncPeripheral<DMA1> = SyncPeripheral::new();
-static EXTI_PERIPHERAL: SyncPeripheral<EXTI> = SyncPeripheral::new();
-static TIM2_PERIPHERAL: SyncPeripheral<TIM2> = SyncPeripheral::new();
+static DEVICE_PERIPHERALS: SyncPeripheral<DevicePeripherals> = SyncPeripheral::new();
 
 // Commands
 const NOP: [u8; 1] = commands::Nop::bytes();
@@ -49,93 +41,88 @@ static COMMANDS: SyncQueue<&[u8], 16> = SyncQueue::new();
 static STATE: SyncState = SyncState::new();
 
 #[inline]
-fn send_command(command: &[u8], dma1: &mut DMA1, spi1: &mut SPI1) {
+fn send_command(command: &[u8], dp: &mut DevicePeripherals) {
     // Write memory address for SPI1 TX
-    dma1.ch3()
+    dp.DMA1
+        .ch3()
         .mar()
         .write(|w| unsafe { w.bits(command.as_ptr() as u32) });
     let transfer_size = command.len() as u32;
     // Set DMA transfer size for SPI1 RX, TX
-    dma1.ch2()
+    dp.DMA1
+        .ch2()
         .ndtr()
         .write(|w| unsafe { w.bits(transfer_size) });
-    dma1.ch3()
+    dp.DMA1
+        .ch3()
         .ndtr()
         .write(|w| unsafe { w.bits(transfer_size) });
 
     // Enable DMA for SPI1 RX, TX
-    dma1.ch2().cr().modify(|_, w| w.en().set_bit());
-    dma1.ch3().cr().modify(|_, w| w.en().set_bit());
+    dp.DMA1.ch2().cr().modify(|_, w| w.en().set_bit());
+    dp.DMA1.ch3().cr().modify(|_, w| w.en().set_bit());
     // Enable SPI1
-    spi1.cr1().modify(|_, w| w.spe().enabled());
+    dp.SPI1.cr1().modify(|_, w| w.spe().enabled());
 }
 
 #[inline]
-fn pulse_ce(gpioa: &mut GPIOA, tim2: &mut TIM2) {
+fn pulse_ce(dp: &mut DevicePeripherals) {
     // Set CE high
-    gpioa.bsrr().write(|w| w.bs0().set_bit());
+    dp.GPIOA.bsrr().write(|w| w.bs0().set_bit());
     // Enable counter, one-pulse mode
-    tim2.cr1().write(|w| w.opm().enabled().cen().enabled());
+    dp.TIM2.cr1().write(|w| w.opm().enabled().cen().enabled());
 }
 
 #[inline]
-fn listen_payload(usart2: &mut USART2, dma1: &mut DMA1) {
-    usart2.cr1().modify(|_, w| w.ue().set_bit());
-    dma1.ch6().ndtr().write(|w| unsafe { w.bits(32) });
-    dma1.ch6().cr().modify(|_, w| w.en().set_bit());
+fn listen_payload(dp: &mut DevicePeripherals) {
+    dp.USART2.cr1().modify(|_, w| w.ue().set_bit());
+    dp.DMA1.ch6().ndtr().write(|w| unsafe { w.bits(32) });
+    dp.DMA1.ch6().cr().modify(|_, w| w.en().set_bit());
 }
 
 /// USART2 RX DMA
 #[interrupt]
 fn DMA1_CH6() {
-    let dma1 = DMA1_PERIPHERAL.get();
-    let spi1 = SPI1_PERIPHERAL.get();
-    let usart2 = USART2_PERIPHERAL.get();
+    let dp = DEVICE_PERIPHERALS.get();
 
-    if dma1.isr().read().tcif6().bit_is_set() {
-        dma1.ch6().cr().modify(|_, w| w.en().clear_bit());
-        dma1.ifcr().write(|w| w.ctcif6().set_bit());
-        usart2.cr1().modify(|_, w| w.ue().clear_bit());
+    if dp.DMA1.isr().read().tcif6().bit_is_set() {
+        dp.DMA1.ch6().cr().modify(|_, w| w.en().clear_bit());
+        dp.DMA1.ifcr().write(|w| w.ctcif6().set_bit());
+        dp.USART2.cr1().modify(|_, w| w.ue().clear_bit());
 
         #[allow(static_mut_refs)]
-        send_command(unsafe { &W_TX_PAYLOAD }, dma1, spi1);
+        send_command(unsafe { &W_TX_PAYLOAD }, dp);
     }
 }
 
 /// SPI1 RX DMA
 #[interrupt]
 fn DMA1_CH2() {
-    #[allow(static_mut_refs)]
+    let dp = DEVICE_PERIPHERALS.get();
+    let commands = COMMANDS.get();
     let state = STATE.get();
 
-    let dma1 = DMA1_PERIPHERAL.get();
-    let usart2 = USART2_PERIPHERAL.get();
-    let spi1 = SPI1_PERIPHERAL.get();
-    let gpioa = GPIOA_PERIPHERAL.get();
-    let tim2 = TIM2_PERIPHERAL.get();
-    let commands = COMMANDS.get();
-
-    if dma1.isr().read().tcif2().bit_is_set() {
-        dma1.ch2().cr().modify(|_, w| w.en().clear_bit());
-        dma1.ifcr().write(|w| w.ctcif2().set_bit());
+    if dp.DMA1.isr().read().tcif2().bit_is_set() {
+        dp.DMA1.ch2().cr().modify(|_, w| w.en().clear_bit());
+        dp.DMA1.ifcr().write(|w| w.ctcif2().set_bit());
 
         // Disable SPI1
-        spi1.cr1().modify(|_, w| w.spe().clear_bit());
+        dp.SPI1.cr1().modify(|_, w| w.spe().clear_bit());
 
         // Pulse CE if payload written
         #[allow(static_mut_refs)]
-        if dma1.ch3().mar().read() == unsafe { W_TX_PAYLOAD.as_ptr() } as u32 {
-            pulse_ce(gpioa, tim2);
+        if dp.DMA1.ch3().mar().read() == unsafe { W_TX_PAYLOAD.as_ptr() } as u32 {
+            pulse_ce(dp);
             // Read next payload
-            listen_payload(usart2, dma1);
+            listen_payload(dp);
         }
 
         // Send next command
         if let Some(command) = commands.dequeue() {
-            send_command(command, dma1, spi1);
+            send_command(command, dp);
             if *state == State::Init && commands.is_empty() {
                 *state = State::Handshake;
-                listen_payload(usart2, dma1);
+                listen_payload(dp);
             }
         }
     }
@@ -144,40 +131,37 @@ fn DMA1_CH2() {
 /// SPI1 TX DMA
 #[interrupt]
 fn DMA1_CH3() {
-    let dma1 = DMA1_PERIPHERAL.get();
-    if dma1.isr().read().tcif3().bit_is_set() {
-        dma1.ch3().cr().modify(|_, w| w.en().clear_bit());
-        dma1.ifcr().write(|w| w.ctcif3().set_bit());
+    let dp = DEVICE_PERIPHERALS.get();
+    if dp.DMA1.isr().read().tcif3().bit_is_set() {
+        dp.DMA1.ch3().cr().modify(|_, w| w.en().clear_bit());
+        dp.DMA1.ifcr().write(|w| w.ctcif3().set_bit());
     }
 }
 
 #[interrupt]
 fn EXTI1() {
-    let dma1 = DMA1_PERIPHERAL.get();
-    let spi1 = SPI1_PERIPHERAL.get();
-    let exti = EXTI_PERIPHERAL.get();
+    let dp = DEVICE_PERIPHERALS.get();
     let commands = COMMANDS.get();
 
-    if exti.pr1().read().pr1().bit_is_set() {
-        if dma1.ch2().cr().read().en().bit_is_set() {
+    if dp.EXTI.pr1().read().pr1().bit_is_set() {
+        if dp.DMA1.ch2().cr().read().en().bit_is_set() {
             let _ = commands.enqueue(&RESET_TX_DS);
         } else {
-            send_command(&RESET_TX_DS, dma1, spi1);
+            send_command(&RESET_TX_DS, dp);
         }
-        exti.pr1().write(|w| w.pr1().clear_bit_by_one());
+        dp.EXTI.pr1().write(|w| w.pr1().clear_bit_by_one());
     }
 }
 
 #[interrupt]
 fn TIM2() {
-    let tim2 = TIM2_PERIPHERAL.get();
-    let gpioa = GPIOA_PERIPHERAL.get();
-    let state = STATE.get();
+    let dp = DEVICE_PERIPHERALS.get();
     let cp = CORE_PERIPHERALS.get();
+    let state = STATE.get();
 
-    if tim2.sr().read().uif().bit_is_set() {
-        gpioa.bsrr().write(|w| w.br0().set_bit());
-        tim2.sr().write(|w| w.uif().clear_bit());
+    if dp.TIM2.sr().read().uif().bit_is_set() {
+        dp.GPIOA.bsrr().write(|w| w.br0().set_bit());
+        dp.TIM2.sr().write(|w| w.uif().clear_bit());
     }
 }
 
@@ -185,9 +169,9 @@ fn TIM2() {
 fn main() -> ! {
     // Device defaults to 4MHz clock
 
-    let cp = cortex_m::Peripherals::take().unwrap();
+    let cp = CorePeripherals::take().unwrap();
     CORE_PERIPHERALS.set(cp);
-    let dp = Peripherals::take().unwrap();
+    let dp = DevicePeripherals::take().unwrap();
 
     // Set system clock speed to 200 khz
     dp.RCC
@@ -352,18 +336,11 @@ fn main() -> ! {
         cortex_m::peripheral::NVIC::unmask(Interrupt::EXTI1);
         cortex_m::peripheral::NVIC::unmask(Interrupt::TIM2);
     }
-    PWR_PERIPHERAL.set(dp.PWR);
-    GPIOA_PERIPHERAL.set(dp.GPIOA);
-    SPI1_PERIPHERAL.set(dp.SPI1);
-    USART2_PERIPHERAL.set(dp.USART2);
-    DMA1_PERIPHERAL.set(dp.DMA1);
-    EXTI_PERIPHERAL.set(dp.EXTI);
-    TIM2_PERIPHERAL.set(dp.TIM2);
+    DEVICE_PERIPHERALS.set(dp);
 
-    let dma1 = DMA1_PERIPHERAL.get();
-    let spi1 = SPI1_PERIPHERAL.get();
+    let dp = DEVICE_PERIPHERALS.get();
 
-    send_command(&W_RF_CH, dma1, spi1);
+    send_command(&W_RF_CH, dp);
 
     #[allow(clippy::empty_loop)]
     loop {
