@@ -1,6 +1,8 @@
 #[derive(PartialEq)]
 pub enum State {
     Init,
-    Handshake,
+    PulseCe,
+    HandleIrq,
+    BeginSleep,
     Connected,
 }

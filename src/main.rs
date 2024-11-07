@@ -13,6 +13,8 @@ use stm32l4::stm32l4x2::{interrupt, Interrupt, Peripherals as DevicePeripherals}
 const USART2_RDR: u32 = 0x4000_4424;
 const SPI1_DR: u32 = 0x4001_300C;
 const TX_ADDR: u64 = 0xA2891FFF6A;
+const SLEEP_DEEP_ON: u32 = 0b110;
+const SLEEP_DEEP_OFF: u32 = 0b010;
 
 static CORE_PERIPHERALS: SyncPeripheral<CorePeripherals> = SyncPeripheral::new();
 static DEVICE_PERIPHERALS: SyncPeripheral<DevicePeripherals> = SyncPeripheral::new();
@@ -29,14 +31,15 @@ const W_RX_ADDR_P0: [u8; 6] =
 const W_CONFIG: [u8; 2] = commands::WRegister(
     registers::Config::new()
         .with_pwr_up(true)
-        .with_mask_max_rt(true)
         .with_mask_rx_dr(true),
 )
 .bytes();
-const RESET_TX_DS: [u8; 2] = commands::WRegister(registers::Status::new().with_tx_ds(true)).bytes();
-const RESET_MAX_RT: [u8; 2] =
-    commands::WRegister(registers::Status::new().with_max_rt(true)).bytes();
+const POWER_DOWN: [u8; 2] =
+    commands::WRegister(registers::Config::new().with_pwr_up(false)).bytes();
+const RESET_INTERRUPTS: [u8; 2] =
+    commands::WRegister(registers::Status::new().with_max_rt(true).with_tx_ds(true)).bytes();
 const HANDSHAKE: [u8; 33] = commands::WTxPayload([b'C'; 32]).bytes();
+const FLUSH_TX: [u8; 1] = commands::FlushTx::bytes();
 
 static mut W_TX_PAYLOAD: [u8; 33] = commands::WTxPayload([0; 32]).bytes();
 static mut SPI1_RX_BUFFER: [u8; 33] = [0; 33];
@@ -83,6 +86,12 @@ fn listen_payload(dp: &mut DevicePeripherals) {
     dp.DMA1.ch6().cr().modify(|_, w| w.en().set_bit());
 }
 
+#[inline]
+fn stop_listen_payload(dp: &mut DevicePeripherals) {
+    dp.USART2.cr1().modify(|_, w| w.ue().clear_bit());
+    dp.DMA1.ch6().cr().modify(|_, w| w.en().clear_bit());
+}
+
 /// USART2 RX DMA
 #[interrupt]
 fn DMA1_CH6() {
@@ -101,9 +110,11 @@ fn DMA1_CH6() {
 /// SPI1 RX DMA
 #[interrupt]
 fn DMA1_CH2() {
+    let cp = CORE_PERIPHERALS.get();
     let dp = DEVICE_PERIPHERALS.get();
     let commands = COMMANDS.get();
     let state = STATE.get();
+    let status = unsafe { SPI1_RX_BUFFER[0] };
 
     if dp.DMA1.isr().read().tcif2().bit_is_set() {
         dp.DMA1.ch2().cr().modify(|_, w| w.en().clear_bit());
@@ -112,26 +123,59 @@ fn DMA1_CH2() {
         // Disable SPI1
         dp.SPI1.cr1().modify(|_, w| w.spe().clear_bit());
 
-        match *state {
-            State::Init => {
-                // Send next command
-                if let Some(command) = commands.dequeue() {
-                    send_command(command, dp);
-                    if commands.is_empty() {
-                        *state = State::Handshake;
+        // Send next command
+        if let Some(command) = commands.dequeue() {
+            send_command(command, dp);
+        } else {
+            match *state {
+                State::Init => pulse_ce(dp),
+                State::PulseCe => pulse_ce(dp),
+                State::HandleIrq => {
+                    let status = registers::Status::from_bits(status);
+                    if status.max_rt() {
+                        let _ = commands.enqueue(&FLUSH_TX);
+                        let _ = commands.enqueue(&POWER_DOWN);
+                        dp.GPIOA.bsrr().write(|w| w.br8().set_bit());
+                        *state = State::BeginSleep;
+                    } else if status.tx_ds() {
+                        *state = State::Connected;
+                        dp.RTC.cr().modify(|_, w| w.wute().clear_bit());
+                        listen_payload(dp);
+                        dp.GPIOA.bsrr().write(|w| w.bs8().set_bit());
+                    }
+                    send_command(&RESET_INTERRUPTS, dp);
+                }
+                State::BeginSleep => {
+                    stop_listen_payload(dp);
+                    // go sleep
+                    // This is entered twice because commands is empty twice
+                    if dp.RTC.cr().read().wute().bit_is_clear() {
+                        while dp.RTC.isr().read().wutwf().bit_is_clear() {}
+                        dp.RTC.cr().modify(|_, w| w.wute().set_bit());
+                    }
+                    unsafe {
+                        // Turn on deepsleep
+                        cp.SCB.scr.write(SLEEP_DEEP_ON);
                     }
                 }
-            }
-            State::Handshake => {
-                pulse_ce(dp);
-            }
-            State::Connected => {
-                // Pulse CE if payload written
-                #[allow(static_mut_refs)]
-                if dp.DMA1.ch3().mar().read() == unsafe { W_TX_PAYLOAD.as_ptr() } as u32 {
-                    pulse_ce(dp);
-                    // Read next payload
-                    listen_payload(dp);
+                State::Connected => {
+                    if dp.DMA1.ch3().mar().read() == NOP.as_ptr() as u32 {
+                        let status = registers::Status::from_bits(status);
+                        if status.max_rt() {
+                            let _ = commands.enqueue(&FLUSH_TX);
+                            let _ = commands.enqueue(&POWER_DOWN);
+                            dp.GPIOA.bsrr().write(|w| w.br8().set_bit());
+                            *state = State::BeginSleep;
+                        } else if status.tx_ds() {
+                            // *state = State::Connected;
+                        }
+                        send_command(&RESET_INTERRUPTS, dp);
+                    } else if dp.DMA1.ch3().mar().read() == unsafe { W_TX_PAYLOAD.as_ptr() } as u32
+                    {
+                        pulse_ce(dp);
+                        // Read next payload
+                        listen_payload(dp);
+                    }
                 }
             }
         }
@@ -151,34 +195,32 @@ fn DMA1_CH3() {
 #[interrupt]
 fn EXTI1() {
     let dp = DEVICE_PERIPHERALS.get();
-    let commands = COMMANDS.get();
+    let state = STATE.get();
+    // let commands = COMMANDS.get();
 
     if dp.EXTI.pr1().read().pr1().bit_is_set() {
-        if dp.DMA1.ch2().cr().read().en().bit_is_set() {
-            let _ = commands.enqueue(&RESET_TX_DS);
-        } else {
-            send_command(&RESET_TX_DS, dp);
-        }
         dp.EXTI.pr1().write(|w| w.pr1().clear_bit_by_one());
+        if *state == State::Connected {
+            send_command(&NOP, dp);
+        } else {
+            *state = State::HandleIrq;
+            send_command(&NOP, dp);
+        }
+        // if dp.DMA1.ch2().cr().read().en().bit_is_set() {
+        //     let _ = commands.enqueue(&NOP);
+        // } else {
+
+        // }
     }
 }
 
 #[interrupt]
 fn TIM2() {
     let dp = DEVICE_PERIPHERALS.get();
-    let cp = CORE_PERIPHERALS.get();
-    let state = STATE.get();
 
     if dp.TIM2.sr().read().uif().bit_is_set() {
-        dp.GPIOA.bsrr().write(|w| w.br0().set_bit());
         dp.TIM2.sr().write(|w| w.uif().clear_bit());
-
-        if *state == State::Handshake {
-            // Go sleep
-            unsafe {
-                // cp.SCB.scr.write(0b010);
-            }
-        }
+        dp.GPIOA.bsrr().write(|w| w.br0().set_bit());
     }
 }
 
@@ -186,20 +228,19 @@ fn TIM2() {
 fn RTC_WKUP() {
     let cp = CORE_PERIPHERALS.get();
     let dp = DEVICE_PERIPHERALS.get();
+    let commands = COMMANDS.get();
+    let state = STATE.get();
 
     if dp.RTC.isr().read().wutf().bit_is_set() {
         dp.RTC.isr().modify(|_, w| w.wutf().clear_bit());
         dp.EXTI.pr1().write(|w| w.pr20().clear_bit_by_one());
         unsafe {
-            // Turn off sleep on exit
-            // cp.SCB.scr.write(0b100);
+            // Turn off sleepdeep
+            cp.SCB.scr.write(SLEEP_DEEP_OFF);
         }
-        if dp.GPIOA.odr().read().odr8().bit_is_set() {
-            dp.GPIOA.bsrr().write(|w| w.br8().set_bit());
-        } else {
-            dp.GPIOA.bsrr().write(|w| w.bs8().set_bit());
-        }
-        send_command(&HANDSHAKE, dp);
+        *state = State::PulseCe;
+        let _ = commands.enqueue(&HANDSHAKE);
+        send_command(&W_CONFIG, dp);
     }
 }
 
@@ -294,14 +335,12 @@ fn main() -> ! {
     dp.EXTI.ftsr1().write(|w| w.tr1().set_bit());
     dp.EXTI.imr1().write(|w| w.mr1().set_bit().mr20().set_bit());
 
-    // Set SleepDeep bit
-    // unsafe { cp.SCB.scr.write(0b100) };
+    // Set SleepOnExit
+    unsafe { cp.SCB.scr.write(SLEEP_DEEP_OFF) };
     // Set Stop 2 low-power mode, remove write protection from BDCR
-    dp.PWR.cr1().write(|w| unsafe {
-        w /*.lpms().bits(0b010)*/
-            .dbp()
-            .set_bit()
-    });
+    dp.PWR
+        .cr1()
+        .write(|w| unsafe { w.lpms().bits(0b010).dbp().set_bit() });
     // Configure RTC, set 5s periodic wake up
     while dp.RCC.csr().read().lsirdy().bit_is_clear() {}
     dp.RCC.bdcr().write(|w| w.rtcsel().lsi().rtcen().set_bit());
@@ -321,6 +360,9 @@ fn main() -> ! {
     // Write wake-up timer registers
     dp.RTC.wutr().write(|w| unsafe { w.wut().bits(4) });
     dp.EXTI.rtsr1().write(|w| w.tr20().set_bit());
+    dp.RTC
+        .cr()
+        .write(|w| unsafe { w.wucksel().bits(0b100) }.wutie().set_bit());
 
     // DMA channel selection
     dp.DMA1
@@ -396,14 +438,6 @@ fn main() -> ! {
     // Enable USART receiver
     dp.USART2.cr1().write(|w| w.re().set_bit());
 
-    dp.RTC.cr().write(|w| {
-        unsafe { w.wucksel().bits(0b100) }
-            .wutie()
-            .set_bit()
-            .wute()
-            .set_bit()
-    });
-
     // Initialization commands
     let commands = COMMANDS.get();
 
@@ -431,6 +465,6 @@ fn main() -> ! {
 
     #[allow(clippy::empty_loop)]
     loop {
-        // asm::wfi();
+        asm::wfi();
     }
 }
