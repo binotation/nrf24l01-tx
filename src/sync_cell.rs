@@ -44,7 +44,7 @@ pub struct SyncState(UnsafeCell<State>);
 
 impl SyncState {
     pub const fn new() -> Self {
-        Self(UnsafeCell::new(State::Init))
+        Self(UnsafeCell::new(State::HandshakePulse))
     }
 
     #[allow(clippy::mut_from_ref)]
