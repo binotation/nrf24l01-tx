@@ -77,7 +77,7 @@ fn pulse_ce(dp: &mut DevicePeripherals) {
     // Set CE high
     dp.GPIOA.bsrr().write(|w| w.bs0().set_bit());
     // Enable counter, one-pulse mode
-    dp.TIM2.cr1().write(|w| w.opm().enabled().cen().enabled());
+    dp.TIM6.cr1().write(|w| w.opm().enabled().cen().enabled());
 }
 
 #[inline]
@@ -116,7 +116,8 @@ fn DMA1_CH2() {
             match *state {
                 State::HandshakePulse => {
                     *state = State::HandshakeIrq;
-                    pulse_ce(dp);
+                    // Wait for nRF24L01 POWER UP
+                    dp.TIM16.cr1().write(|w| w.opm().enabled().cen().enabled());
                 }
                 State::HandshakeIrq => {
                     let status = registers::Status::from_bits(status);
@@ -218,7 +219,7 @@ fn DMA1_CH6() {
     if dp.DMA1.isr().read().tcif6().bit_is_set() {
         dp.DMA1.ch6().cr().modify(|_, w| w.en().clear_bit());
         dp.DMA1.ifcr().write(|w| w.ctcif6().set_bit());
-        dp.USART2.cr1().modify(|_, w| w.ue().clear_bit());
+        dp.USART2.cr1().modify(|_, w| w.ue().clear_bit()); // TODO: Might lose data
 
         #[allow(static_mut_refs)]
         send_command(unsafe { &W_TX_PAYLOAD }, dp);
@@ -236,12 +237,22 @@ fn DMA1_CH3() {
 }
 
 #[interrupt]
-fn TIM2() {
+fn TIM6_DACUNDER() {
     let dp = DEVICE_PERIPHERALS.get();
 
-    if dp.TIM2.sr().read().uif().bit_is_set() {
-        dp.TIM2.sr().write(|w| w.uif().clear_bit());
+    if dp.TIM6.sr().read().uif().bit_is_set() {
+        dp.TIM6.sr().write(|w| w.uif().clear_bit());
         dp.GPIOA.bsrr().write(|w| w.br0().set_bit());
+    }
+}
+
+#[interrupt]
+fn TIM1_UP_TIM16() {
+    let dp = DEVICE_PERIPHERALS.get();
+
+    if dp.TIM16.sr().read().uif().bit_is_set() {
+        dp.TIM16.sr().write(|w| w.uif().clear_bit());
+        pulse_ce(dp);
     }
 }
 
@@ -258,20 +269,22 @@ fn main() -> ! {
         .cr()
         .write(|w| w.msirange().range200k().msirgsel().set_bit());
 
-    // Enable peripheral clocks: DMA1, GPIOA, USART2, TIM2, SPI1
+    // Enable peripheral clocks
     dp.RCC.ahb1enr().write(|w| w.dma1en().set_bit());
     dp.RCC.ahb2enr().write(|w| w.gpioaen().set_bit());
     dp.RCC.apb1enr1().write(|w| {
         w.usart2en()
             .enabled()
-            .tim2en()
+            .tim6en()
             .set_bit()
             .pwren()
             .set_bit()
             .rtcapben()
             .set_bit()
     });
-    dp.RCC.apb2enr().write(|w| w.spi1en().set_bit());
+    dp.RCC
+        .apb2enr()
+        .write(|w| w.spi1en().set_bit().tim16en().set_bit());
 
     // USART2: A2 (TX), A3 (RX) as AF 7
     // SPI1: A4 (NSS), A5 (SCK), A6 (MISO), A7 (MOSI) as AF 5
@@ -417,10 +430,15 @@ fn main() -> ! {
         .write(|w| w.minc().set_bit().dir().set_bit().tcie().set_bit());
 
     // Set 11us interval
-    dp.TIM2.arr().write(|w| unsafe { w.arr().bits(3) }); // 200khz * 11us approx. 3
+    dp.TIM6.arr().write(|w| unsafe { w.arr().bits(3) }); // 200khz * 11us approx. 3
 
-    // Enable TIM2 update interrupt
-    dp.TIM2.dier().write(|w| w.uie().set_bit());
+    // Enable TIM6 update interrupt
+    dp.TIM6.dier().write(|w| w.uie().set_bit());
+
+    // TIM16: wait for nRF24L01 POWER UP
+    dp.TIM16.psc().write(|w| unsafe { w.bits(299) });
+    dp.TIM16.arr().write(|w| unsafe { w.arr().bits(1) }); // 200khz / (299 + 1) * 1.5ms
+    dp.TIM16.dier().write(|w| w.uie().set_bit());
 
     // USART2: Configure baud rate 9600
     dp.USART2.brr().write(|w| unsafe { w.bits(21) }); // 200khz / 9600 approx. 21
@@ -461,7 +479,8 @@ fn main() -> ! {
         cortex_m::peripheral::NVIC::unmask(Interrupt::DMA1_CH3);
         cortex_m::peripheral::NVIC::unmask(Interrupt::DMA1_CH6);
         cortex_m::peripheral::NVIC::unmask(Interrupt::EXTI1);
-        cortex_m::peripheral::NVIC::unmask(Interrupt::TIM2);
+        cortex_m::peripheral::NVIC::unmask(Interrupt::TIM6_DACUNDER);
+        cortex_m::peripheral::NVIC::unmask(Interrupt::TIM1_UP_TIM16);
     }
     CORE_PERIPHERALS.set(cp);
     DEVICE_PERIPHERALS.set(dp);
