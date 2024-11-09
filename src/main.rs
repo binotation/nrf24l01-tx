@@ -6,7 +6,7 @@ use cortex_m_rt::entry;
 use nrf24l01_tx::sync_cell::{SyncPeripheral, SyncQueue, SyncState};
 use nrf24l01_tx::State;
 // use cortex_m_semihosting::hprintln;
-use nrf24l01_commands::{commands, registers};
+use nrf24l01_commands::{commands, commands::Command, registers};
 use panic_semihosting as _; // logs messages to the host stderr; requires a debugger
 use stm32l4::stm32l4x2::{interrupt, Interrupt, Peripherals as DevicePeripherals};
 
@@ -42,7 +42,73 @@ const RESET_INTERRUPTS: [u8; 2] =
 const HANDSHAKE: [u8; 33] = commands::WTxPayload([b'C'; 32]).bytes();
 const FLUSH_TX: [u8; 1] = commands::FlushTx::bytes();
 
-static mut W_TX_PAYLOAD: [u8; 33] = commands::WTxPayload([0; 32]).bytes();
+static mut W_TX_PAYLOAD: [u8; 65] = [
+    commands::WTxPayload::<32>::WORD,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    commands::WTxPayload::<32>::WORD,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+];
 static mut SPI1_RX_BUFFER: [u8; 33] = [0; 33];
 static COMMANDS: SyncQueue<&[u8], 16> = SyncQueue::new();
 static STATE: SyncState = SyncState::new();
@@ -83,7 +149,7 @@ fn pulse_ce(dp: &mut DevicePeripherals) {
 #[inline]
 fn listen_payload(dp: &mut DevicePeripherals) {
     dp.USART2.cr1().modify(|_, w| w.ue().set_bit());
-    dp.DMA1.ch6().ndtr().write(|w| unsafe { w.bits(32) });
+    dp.DMA1.ch6().ndtr().write(|w| unsafe { w.bits(64) });
     dp.DMA1.ch6().cr().modify(|_, w| w.en().set_bit());
 }
 
@@ -158,10 +224,10 @@ fn DMA1_CH2() {
                         }
                         send_command(&RESET_INTERRUPTS, dp);
                     } else if dp.DMA1.ch3().mar().read() == unsafe { W_TX_PAYLOAD.as_ptr() } as u32
+                        || dp.DMA1.ch3().mar().read()
+                            == unsafe { W_TX_PAYLOAD[32..].as_ptr() } as u32
                     {
                         pulse_ce(dp);
-                        // Listen next payload
-                        listen_payload(dp);
                     }
                 }
             }
@@ -216,13 +282,16 @@ fn RTC_WKUP() {
 fn DMA1_CH6() {
     let dp = DEVICE_PERIPHERALS.get();
 
-    if dp.DMA1.isr().read().tcif6().bit_is_set() {
-        dp.DMA1.ch6().cr().modify(|_, w| w.en().clear_bit());
+    if dp.DMA1.isr().read().htif6().bit_is_set() {
+        dp.DMA1.ifcr().write(|w| w.chtif6().set_bit());
+        send_command(unsafe { &W_TX_PAYLOAD[0..33] }, dp);
+    } else if dp.DMA1.isr().read().tcif6().bit_is_set() {
         dp.DMA1.ifcr().write(|w| w.ctcif6().set_bit());
-        dp.USART2.cr1().modify(|_, w| w.ue().clear_bit()); // TODO: Might lose data
-
         #[allow(static_mut_refs)]
-        send_command(unsafe { &W_TX_PAYLOAD }, dp);
+        unsafe {
+            W_TX_PAYLOAD[32] = commands::WTxPayload::<32>::WORD
+        };
+        send_command(unsafe { &W_TX_PAYLOAD[32..65] }, dp);
     }
 }
 
@@ -399,10 +468,16 @@ fn main() -> ! {
         .ch6()
         .mar()
         .write(|w| unsafe { w.ma().bits(W_TX_PAYLOAD[1..].as_ptr() as u32) });
-    dp.DMA1
-        .ch6()
-        .cr()
-        .write(|w| w.minc().set_bit().tcie().set_bit());
+    dp.DMA1.ch6().cr().write(|w| {
+        w.minc()
+            .set_bit()
+            .htie()
+            .set_bit()
+            .tcie()
+            .set_bit()
+            .circ()
+            .set_bit()
+    });
 
     // DMA channel 2 SPI1 RX
     dp.DMA1
