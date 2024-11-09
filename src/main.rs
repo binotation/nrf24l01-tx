@@ -12,23 +12,24 @@ use stm32l4::stm32l4x2::{interrupt, Interrupt, Peripherals as DevicePeripherals}
 
 const USART2_RDR: u32 = 0x4000_4424;
 const SPI1_DR: u32 = 0x4001_300C;
-const TX_ADDR: u64 = 0xA2891FFF6A;
-const SLEEP_DEEP_ON: u32 = 0b110;
-const SLEEP_DEEP_OFF: u32 = 0b010;
-const SLEEP_DURATION: u16 = 5;
+const RF_ADDRESS: u64 = 0xA2891F;
+const SLEEPDEEP_ON: u32 = 0b110;
+const SLEEPDEEP_OFF: u32 = 0b010;
+const SLEEP_DURATION: u16 = 10;
 
 static CORE_PERIPHERALS: SyncPeripheral<CorePeripherals> = SyncPeripheral::new();
 static DEVICE_PERIPHERALS: SyncPeripheral<DevicePeripherals> = SyncPeripheral::new();
 
 // Commands
 const NOP: [u8; 1] = commands::Nop::bytes();
-const W_RF_CH: [u8; 2] = commands::WRegister(registers::RfCh::new().with_rf_ch(110)).bytes();
+const W_RF_CH: [u8; 2] = commands::WRegister(registers::RfCh::new().with_rf_ch(0)).bytes();
 const W_RF_SETUP: [u8; 2] =
     commands::WRegister(registers::RfSetup::new().with_rf_dr(false)).bytes();
-const W_TX_ADDR: [u8; 6] =
-    commands::WRegister(registers::TxAddr::<5>::new().with_tx_addr(TX_ADDR)).bytes();
-const W_RX_ADDR_P0: [u8; 6] =
-    commands::WRegister(registers::RxAddrP0::<5>::new().with_rx_addr_p0(TX_ADDR)).bytes();
+const W_SETUP_AW: [u8; 2] = commands::WRegister(registers::SetupAw::new().with_aw(1)).bytes();
+const W_TX_ADDR: [u8; 4] =
+    commands::WRegister(registers::TxAddr::<3>::new().with_tx_addr(RF_ADDRESS)).bytes();
+const W_RX_ADDR_P0: [u8; 4] =
+    commands::WRegister(registers::RxAddrP0::<3>::new().with_rx_addr_p0(RF_ADDRESS)).bytes();
 const W_CONFIG: [u8; 2] = commands::WRegister(
     registers::Config::new()
         .with_pwr_up(true)
@@ -42,7 +43,7 @@ const RESET_INTERRUPTS: [u8; 2] =
 const HANDSHAKE: [u8; 33] = commands::WTxPayload([b'C'; 32]).bytes();
 const FLUSH_TX: [u8; 1] = commands::FlushTx::bytes();
 
-static mut W_TX_PAYLOAD: [u8; 65] = [
+static mut PAYLOAD_DOUBLE_BUFFER: [u8; 65] = [
     commands::WTxPayload::<32>::WORD,
     0,
     0,
@@ -132,10 +133,22 @@ fn send_command(command: &[u8], dp: &mut DevicePeripherals) {
         .write(|w| unsafe { w.bits(transfer_size) });
 
     // Enable DMA for SPI1 RX, TX
-    dp.DMA1.ch2().cr().modify(|_, w| w.en().set_bit());
-    dp.DMA1.ch3().cr().modify(|_, w| w.en().set_bit());
+    dp.DMA1
+        .ch2()
+        .cr()
+        .write(|w| w.minc().set_bit().tcie().set_bit().en().set_bit());
+    dp.DMA1.ch3().cr().write(|w| {
+        w.minc()
+            .set_bit()
+            .dir()
+            .set_bit()
+            .tcie()
+            .set_bit()
+            .en()
+            .set_bit()
+    });
     // Enable SPI1
-    dp.SPI1.cr1().modify(|_, w| w.spe().enabled());
+    dp.SPI1.cr1().write(|w| w.mstr().set_bit().spe().enabled());
 }
 
 #[inline]
@@ -148,32 +161,60 @@ fn pulse_ce(dp: &mut DevicePeripherals) {
 
 #[inline]
 fn listen_payload(dp: &mut DevicePeripherals) {
-    dp.USART2.cr1().modify(|_, w| w.ue().set_bit());
+    // Enable DMA Ch6 and USART
     dp.DMA1.ch6().ndtr().write(|w| unsafe { w.bits(64) });
-    dp.DMA1.ch6().cr().modify(|_, w| w.en().set_bit());
+    dp.DMA1.ch6().cr().write(|w| {
+        w.minc()
+            .set_bit()
+            .htie()
+            .set_bit()
+            .tcie()
+            .set_bit()
+            .circ()
+            .set_bit()
+            .en()
+            .set_bit()
+    });
+    dp.USART2.cr1().write(|w| w.re().set_bit().ue().set_bit());
 }
 
 #[inline]
 fn stop_listen_payload(dp: &mut DevicePeripherals) {
-    dp.USART2.cr1().modify(|_, w| w.ue().clear_bit());
-    dp.DMA1.ch6().cr().modify(|_, w| w.en().clear_bit());
+    // Disable USART and DMA Ch6
+    dp.USART2.cr1().write(|w| w.re().set_bit().ue().clear_bit());
+    dp.DMA1.ch6().cr().write(|w| {
+        w.minc()
+            .set_bit()
+            .htie()
+            .set_bit()
+            .tcie()
+            .set_bit()
+            .circ()
+            .set_bit()
+            .en()
+            .clear_bit()
+    });
 }
 
-/// SPI1 RX DMA
+/// SPI1 RX DMA - nRF24L01 command complete
 #[interrupt]
 fn DMA1_CH2() {
     let cp = CORE_PERIPHERALS.get();
     let dp = DEVICE_PERIPHERALS.get();
     let commands = COMMANDS.get();
     let state = STATE.get();
-    let status = unsafe { SPI1_RX_BUFFER[0] };
 
     if dp.DMA1.isr().read().tcif2().bit_is_set() {
-        dp.DMA1.ch2().cr().modify(|_, w| w.en().clear_bit());
-        dp.DMA1.ifcr().write(|w| w.ctcif2().set_bit());
+        // Disable DMA Ch2
+        dp.DMA1
+            .ch2()
+            .cr()
+            .write(|w| w.minc().set_bit().tcie().set_bit().en().clear_bit());
 
         // Disable SPI1
-        dp.SPI1.cr1().modify(|_, w| w.spe().clear_bit());
+        dp.SPI1
+            .cr1()
+            .write(|w| w.mstr().set_bit().spe().clear_bit());
 
         // Send next command
         if let Some(command) = commands.dequeue() {
@@ -181,38 +222,55 @@ fn DMA1_CH2() {
         } else {
             match *state {
                 State::HandshakePulse => {
-                    *state = State::HandshakeIrq;
-                    // Wait for nRF24L01 POWER UP
+                    // Wait for nRF24L01 to power up
                     dp.TIM16.cr1().write(|w| w.opm().enabled().cen().enabled());
+                    *state = State::HandshakeIrq;
                 }
                 State::HandshakeIrq => {
-                    let status = registers::Status::from_bits(status);
+                    let status = registers::Status::from_bits(unsafe { SPI1_RX_BUFFER[0] });
                     if status.max_rt() {
                         let _ = commands.enqueue(&POWER_DOWN);
                         *state = State::ContinueSleep;
                     } else if status.tx_ds() {
-                        dp.RTC.cr().modify(|_, w| w.wute().clear_bit());
-                        *state = State::Connected;
+                        // Disable wake-up timer
+                        dp.RTC.cr().write(|w| {
+                            unsafe { w.wucksel().bits(0b100) }
+                                .wutie()
+                                .set_bit()
+                                .wute()
+                                .clear_bit()
+                        });
                         listen_payload(dp);
                         dp.GPIOA.bsrr().write(|w| w.bs8().set_bit());
+                        *state = State::Connected;
                     }
                     send_command(&RESET_INTERRUPTS, dp);
                 }
                 State::BeginSleep => {
-                    // Turn on wake-up timer
+                    // This state is only entered from State::Connected
+                    // Enable wake-up timer
                     while dp.RTC.isr().read().wutwf().bit_is_clear() {}
-                    dp.RTC.cr().modify(|_, w| w.wute().set_bit());
+                    dp.RTC.cr().write(|w| {
+                        unsafe { w.wucksel().bits(0b100) }
+                            .wutie()
+                            .set_bit()
+                            .wute()
+                            .set_bit()
+                    });
                     unsafe {
-                        cp.SCB.scr.write(SLEEP_DEEP_ON);
+                        cp.SCB.scr.write(SLEEPDEEP_ON);
                     }
                 }
                 State::ContinueSleep => unsafe {
-                    cp.SCB.scr.write(SLEEP_DEEP_ON);
+                    // This state is only entered from wake-up and the wake-up timer is already enabled.
+                    cp.SCB.scr.write(SLEEPDEEP_ON);
                 },
                 State::Connected => {
+                    #[allow(static_mut_refs)]
                     if dp.DMA1.ch3().mar().read() == NOP.as_ptr() as u32 {
-                        let status = registers::Status::from_bits(status);
+                        let status = registers::Status::from_bits(unsafe { SPI1_RX_BUFFER[0] });
                         if status.max_rt() {
+                            // Disconnected, power off GPS
                             dp.GPIOA.bsrr().write(|w| w.br8().set_bit());
                             stop_listen_payload(dp);
                             let _ = commands.enqueue(&FLUSH_TX);
@@ -223,43 +281,37 @@ fn DMA1_CH2() {
                             // TODO: TX FIFO counter
                         }
                         send_command(&RESET_INTERRUPTS, dp);
-                    } else if dp.DMA1.ch3().mar().read() == unsafe { W_TX_PAYLOAD.as_ptr() } as u32
+                    } else if dp.DMA1.ch3().mar().read()
+                        == unsafe { PAYLOAD_DOUBLE_BUFFER.as_ptr() } as u32
                         || dp.DMA1.ch3().mar().read()
-                            == unsafe { W_TX_PAYLOAD[32..].as_ptr() } as u32
+                            == unsafe { PAYLOAD_DOUBLE_BUFFER[32..].as_ptr() } as u32
                     {
                         pulse_ce(dp);
                     }
                 }
             }
         }
+        dp.DMA1.ifcr().write(|w| w.ctcif2().set_bit());
     }
 }
 
+/// Handle IRQ. Timing calculations for delay between payload upload and active IRQ:
+/// minimum delay ~ 130 + 305 (nrf24l01 p.38) + 130 + 49 = 624 us
+/// maximum delay ~ 130 + 305 + 250 + 130 + 305 + 250 + 130 + 305 + 130 + 50? ~ 2 ms
+/// A UART byte is transacted in ~1 ms, so 32 bytes for the next payload will take 32ms.
+/// This means it should be safe to assume there is no ongoing SPI transaction.
 #[interrupt]
 fn EXTI1() {
     let dp = DEVICE_PERIPHERALS.get();
-    let state = STATE.get();
-    // let commands = COMMANDS.get();
 
     if dp.EXTI.pr1().read().pr1().bit_is_set() {
+        send_command(&NOP, dp);
         dp.EXTI.pr1().write(|w| w.pr1().clear_bit_by_one());
-        match *state {
-            State::HandshakeIrq => {
-                send_command(&NOP, dp);
-            }
-            State::Connected => {
-                send_command(&NOP, dp);
-            }
-            _ => (),
-        }
-        // if dp.DMA1.ch2().cr().read().en().bit_is_set() {
-        //     let _ = commands.enqueue(&NOP);
-        // } else {
-
-        // }
     }
 }
 
+/// Periodic wake-up routine. Handshake payload is already in nRF24L01 TX FIFO,
+/// so we only need to pulse CE.
 #[interrupt]
 fn RTC_WKUP() {
     let cp = CORE_PERIPHERALS.get();
@@ -270,58 +322,76 @@ fn RTC_WKUP() {
         dp.RTC.isr().modify(|_, w| w.wutf().clear_bit());
         dp.EXTI.pr1().write(|w| w.pr20().clear_bit_by_one());
         unsafe {
-            cp.SCB.scr.write(SLEEP_DEEP_OFF);
+            // Don't go back into Stop 2
+            cp.SCB.scr.write(SLEEPDEEP_OFF);
         }
         *state = State::HandshakePulse;
+        // Power up nRF24L01
         send_command(&W_CONFIG, dp);
     }
 }
 
-/// USART2 RX DMA
+/// USART2 RX DMA - Transfers GPS NMEA payload to double buffer
 #[interrupt]
 fn DMA1_CH6() {
     let dp = DEVICE_PERIPHERALS.get();
 
     if dp.DMA1.isr().read().htif6().bit_is_set() {
+        // Send payload in the first half of the buffer
+        send_command(unsafe { &PAYLOAD_DOUBLE_BUFFER[0..33] }, dp);
         dp.DMA1.ifcr().write(|w| w.chtif6().set_bit());
-        send_command(unsafe { &W_TX_PAYLOAD[0..33] }, dp);
     } else if dp.DMA1.isr().read().tcif6().bit_is_set() {
-        dp.DMA1.ifcr().write(|w| w.ctcif6().set_bit());
+        // Send payload in the second half of the buffer
         #[allow(static_mut_refs)]
         unsafe {
-            W_TX_PAYLOAD[32] = commands::WTxPayload::<32>::WORD
+            /* SPI runs an order of magnitude faster than USART,
+            W_TX_PAYLOAD command will complete before this is overwritten */
+            PAYLOAD_DOUBLE_BUFFER[32] = commands::WTxPayload::<32>::WORD
         };
-        send_command(unsafe { &W_TX_PAYLOAD[32..65] }, dp);
+        send_command(unsafe { &PAYLOAD_DOUBLE_BUFFER[32..65] }, dp);
+        dp.DMA1.ifcr().write(|w| w.ctcif6().set_bit());
     }
 }
 
-/// SPI1 TX DMA
+/// SPI1 TX DMA - Send nRF24L01 command
 #[interrupt]
 fn DMA1_CH3() {
     let dp = DEVICE_PERIPHERALS.get();
     if dp.DMA1.isr().read().tcif3().bit_is_set() {
-        dp.DMA1.ch3().cr().modify(|_, w| w.en().clear_bit());
+        // Disable DMA Ch3
+        dp.DMA1.ch3().cr().write(|w| {
+            w.minc()
+                .set_bit()
+                .dir()
+                .set_bit()
+                .tcie()
+                .set_bit()
+                .en()
+                .clear_bit()
+        });
         dp.DMA1.ifcr().write(|w| w.ctcif3().set_bit());
     }
 }
 
+/// CE 10us pulse
 #[interrupt]
 fn TIM6_DACUNDER() {
     let dp = DEVICE_PERIPHERALS.get();
 
     if dp.TIM6.sr().read().uif().bit_is_set() {
-        dp.TIM6.sr().write(|w| w.uif().clear_bit());
         dp.GPIOA.bsrr().write(|w| w.br0().set_bit());
+        dp.TIM6.sr().write(|w| w.uif().clear_bit());
     }
 }
 
+/// Wait for nRF24L01 to power up
 #[interrupt]
 fn TIM1_UP_TIM16() {
     let dp = DEVICE_PERIPHERALS.get();
 
     if dp.TIM16.sr().read().uif().bit_is_set() {
-        dp.TIM16.sr().write(|w| w.uif().clear_bit());
         pulse_ce(dp);
+        dp.TIM16.sr().write(|w| w.uif().clear_bit());
     }
 }
 
@@ -419,12 +489,12 @@ fn main() -> ! {
     dp.EXTI.imr1().write(|w| w.mr1().set_bit().mr20().set_bit());
 
     // Set SleepOnExit
-    unsafe { cp.SCB.scr.write(SLEEP_DEEP_OFF) };
+    unsafe { cp.SCB.scr.write(SLEEPDEEP_OFF) };
     // Set Stop 2 low-power mode, remove write protection from BDCR
     dp.PWR
         .cr1()
         .write(|w| unsafe { w.lpms().bits(0b010).dbp().set_bit() });
-    // Configure RTC, set 5s periodic wake up
+    // Configure RTC, set periodic wake up
     while dp.RCC.csr().read().lsirdy().bit_is_clear() {}
     dp.RCC.bdcr().write(|w| w.rtcsel().lsi().rtcen().set_bit());
     // Remove write protection from RTC registers
@@ -467,17 +537,7 @@ fn main() -> ! {
     dp.DMA1
         .ch6()
         .mar()
-        .write(|w| unsafe { w.ma().bits(W_TX_PAYLOAD[1..].as_ptr() as u32) });
-    dp.DMA1.ch6().cr().write(|w| {
-        w.minc()
-            .set_bit()
-            .htie()
-            .set_bit()
-            .tcie()
-            .set_bit()
-            .circ()
-            .set_bit()
-    });
+        .write(|w| unsafe { w.ma().bits(PAYLOAD_DOUBLE_BUFFER[1..].as_ptr() as u32) });
 
     // DMA channel 2 SPI1 RX
     dp.DMA1
@@ -489,20 +549,12 @@ fn main() -> ! {
         .ch2()
         .mar()
         .write(|w| unsafe { w.ma().bits(SPI1_RX_BUFFER.as_ptr() as u32) });
-    dp.DMA1
-        .ch2()
-        .cr()
-        .write(|w| w.minc().set_bit().tcie().set_bit());
 
     // DMA channel 3 SPI1 TX
     dp.DMA1
         .ch3()
         .par()
         .write(|w| unsafe { w.pa().bits(SPI1_DR) });
-    dp.DMA1
-        .ch3()
-        .cr()
-        .write(|w| w.minc().set_bit().dir().set_bit().tcie().set_bit());
 
     // Set 11us interval
     dp.TIM6.arr().write(|w| unsafe { w.arr().bits(3) }); // 200khz * 11us approx. 3
@@ -510,7 +562,7 @@ fn main() -> ! {
     // Enable TIM6 update interrupt
     dp.TIM6.dier().write(|w| w.uie().set_bit());
 
-    // TIM16: wait for nRF24L01 POWER UP
+    // TIM16: wait for nRF24L01 to power up
     dp.TIM16.psc().write(|w| unsafe { w.bits(299) });
     dp.TIM16.arr().write(|w| unsafe { w.arr().bits(1) }); // 200khz / (299 + 1) * 1.5ms
     dp.TIM16.dier().write(|w| w.uie().set_bit());
@@ -532,17 +584,13 @@ fn main() -> ! {
             .rxdmaen()
             .set_bit()
     });
-    // SPI1: set SPI master
-    dp.SPI1.cr1().write(|w| w.mstr().set_bit());
-
-    // Enable USART receiver
-    dp.USART2.cr1().write(|w| w.re().set_bit());
 
     // Initialization commands
     let commands = COMMANDS.get();
 
     unsafe {
         commands.enqueue_unchecked(&W_RF_SETUP);
+        commands.enqueue_unchecked(&W_SETUP_AW);
         commands.enqueue_unchecked(&W_TX_ADDR);
         commands.enqueue_unchecked(&W_RX_ADDR_P0);
         commands.enqueue_unchecked(&W_CONFIG);
@@ -564,7 +612,6 @@ fn main() -> ! {
 
     send_command(&W_RF_CH, dp);
 
-    #[allow(clippy::empty_loop)]
     loop {
         asm::wfi();
     }

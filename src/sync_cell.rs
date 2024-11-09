@@ -26,6 +26,12 @@ impl<P> SyncPeripheral<P> {
 unsafe impl Sync for SyncPeripheral<CorePeripherals> {}
 unsafe impl Sync for SyncPeripheral<DevicePeripherals> {}
 
+impl<P> Default for SyncPeripheral<P> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub struct SyncQueue<T, const N: usize>(UnsafeCell<Queue<T, N>>);
 
 impl<T, const N: usize> SyncQueue<T, N> {
@@ -39,6 +45,12 @@ impl<T, const N: usize> SyncQueue<T, N> {
     }
 }
 unsafe impl Sync for SyncQueue<&[u8], 16> {}
+
+impl<T, const N: usize> Default for SyncQueue<T, N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 pub struct SyncState(UnsafeCell<State>);
 
@@ -54,6 +66,12 @@ impl SyncState {
 }
 unsafe impl Sync for SyncState {}
 
+impl Default for SyncState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub struct SyncNum<T>(UnsafeCell<T>);
 
 impl SyncNum<u8> {
@@ -67,3 +85,9 @@ impl SyncNum<u8> {
     }
 }
 unsafe impl Sync for SyncNum<u8> {}
+
+impl Default for SyncNum<u8> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
