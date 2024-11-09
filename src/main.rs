@@ -111,7 +111,7 @@ static mut PAYLOAD_DOUBLE_BUFFER: [u8; 65] = [
     0,
 ];
 static mut SPI1_RX_BUFFER: [u8; 33] = [0; 33];
-static COMMANDS: SyncQueue<&[u8], 16> = SyncQueue::new();
+static COMMANDS: SyncQueue<&[u8], 8> = SyncQueue::new();
 static STATE: SyncState = SyncState::new();
 
 #[inline]
@@ -229,7 +229,9 @@ fn DMA1_CH2() {
                 State::HandshakeIrq => {
                     let status = registers::Status::from_bits(unsafe { SPI1_RX_BUFFER[0] });
                     if status.max_rt() {
-                        let _ = commands.enqueue(&POWER_DOWN);
+                        unsafe {
+                            commands.enqueue_unchecked(&POWER_DOWN);
+                        }
                         *state = State::ContinueSleep;
                     } else if status.tx_ds() {
                         // Disable wake-up timer
@@ -273,9 +275,11 @@ fn DMA1_CH2() {
                             // Disconnected, power off GPS
                             dp.GPIOA.bsrr().write(|w| w.br8().set_bit());
                             stop_listen_payload(dp);
-                            let _ = commands.enqueue(&FLUSH_TX);
-                            let _ = commands.enqueue(&HANDSHAKE);
-                            let _ = commands.enqueue(&POWER_DOWN);
+                            unsafe {
+                                commands.enqueue_unchecked(&FLUSH_TX);
+                                commands.enqueue_unchecked(&HANDSHAKE);
+                                commands.enqueue_unchecked(&POWER_DOWN);
+                            }
                             *state = State::BeginSleep;
                         } else if status.tx_ds() {
                             // TODO: TX FIFO counter

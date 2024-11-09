@@ -44,7 +44,7 @@ impl<T, const N: usize> SyncQueue<T, N> {
         unsafe { &mut *self.0.get() }
     }
 }
-unsafe impl Sync for SyncQueue<&[u8], 16> {}
+unsafe impl Sync for SyncQueue<&[u8], 8> {}
 
 impl<T, const N: usize> Default for SyncQueue<T, N> {
     fn default() -> Self {
