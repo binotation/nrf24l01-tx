@@ -99,6 +99,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "gps-relay"
+version = "0.1.0"
+dependencies = [
+ "cortex-m",
+ "cortex-m-rt",
+ "cortex-m-semihosting",
+ "heapless",
+ "nrf24l01-commands",
+ "panic-semihosting",
+ "stm32l4",
+]
+
+[[package]]
 name = "hash32"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -139,19 +152,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e356317150125a54f28f10e488035ddba7dc81a195776adaf370953494dd483"
 dependencies = [
  "bitfield-struct",
-]
-
-[[package]]
-name = "nrf24l01-tx"
-version = "0.1.0"
-dependencies = [
- "cortex-m",
- "cortex-m-rt",
- "cortex-m-semihosting",
- "heapless",
- "nrf24l01-commands",
- "panic-semihosting",
- "stm32l4",
 ]
 
 [[package]]

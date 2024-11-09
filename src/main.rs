@@ -3,8 +3,8 @@
 
 use cortex_m::{asm, Peripherals as CorePeripherals};
 use cortex_m_rt::entry;
-use nrf24l01_tx::sync_cell::{SyncPeripheral, SyncQueue, SyncState};
-use nrf24l01_tx::State;
+use gps_relay::sync_cell::{SyncPeripheral, SyncQueue, SyncState};
+use gps_relay::State;
 // use cortex_m_semihosting::hprintln;
 use nrf24l01_commands::{commands, commands::Command, registers};
 use panic_semihosting as _; // logs messages to the host stderr; requires a debugger

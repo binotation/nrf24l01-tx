@@ -2,7 +2,7 @@
 authors = ["binotation"]
 edition = "2021"
 readme = "README.md"
-name = "nrf24l01-tx"
+name = "gps-relay"
 version = "0.1.0"
 
 [dependencies]
@@ -25,7 +25,7 @@ features = ["stm32l4x2"]
 
 # this lets you use `cargo fix`!
 [[bin]]
-name = "nrf24l01-tx"
+name = "gps-relay"
 test = false
 bench = false
 
