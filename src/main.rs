@@ -261,12 +261,38 @@ fn DMA1_CH2() {
                     });
                     unsafe {
                         cp.SCB.scr.write(SLEEPDEEP_ON);
+                        // Prepare to enter Stop 2: enter run mode range 2 with Stop 2 selected
+                        dp.PWR.cr1().write(|w| {
+                            w.vos()
+                                .bits(2)
+                                .lpr()
+                                .clear_bit()
+                                .lpms()
+                                .bits(2)
+                                .dbp()
+                                .set_bit()
+                        });
                     }
+                    while dp.PWR.sr2().read().reglpf().bit_is_set() {}
                 }
-                State::ContinueSleep => unsafe {
-                    // This state is only entered from wake-up and the wake-up timer is already enabled.
-                    cp.SCB.scr.write(SLEEPDEEP_ON);
-                },
+                State::ContinueSleep => {
+                    unsafe {
+                        // This state is only entered from wake-up and the wake-up timer is already enabled.
+                        cp.SCB.scr.write(SLEEPDEEP_ON);
+                        // Prepare to enter Stop 2: enter run mode range 2 with Stop 2 selected
+                        dp.PWR.cr1().write(|w| {
+                            w.vos()
+                                .bits(2)
+                                .lpr()
+                                .clear_bit()
+                                .lpms()
+                                .bits(2)
+                                .dbp()
+                                .set_bit()
+                        });
+                    }
+                    while dp.PWR.sr2().read().reglpf().bit_is_set() {}
+                }
                 State::Connected => {
                     #[allow(static_mut_refs)]
                     if dp.DMA1.ch3().mar().read() == NOP.as_ptr() as u32 {
@@ -328,6 +354,17 @@ fn RTC_WKUP() {
         unsafe {
             // Don't go back into Stop 2
             cp.SCB.scr.write(SLEEPDEEP_OFF);
+            // Enter low-power run mode
+            dp.PWR.cr1().write(|w| {
+                w.vos()
+                    .bits(2)
+                    .lpr()
+                    .set_bit()
+                    .lpms()
+                    .bits(1)
+                    .dbp()
+                    .set_bit()
+            });
         }
         *state = State::HandshakePulse;
         // Power up nRF24L01
@@ -490,12 +527,22 @@ fn main() -> ! {
     dp.EXTI.ftsr1().write(|w| w.tr1().set_bit());
     dp.EXTI.imr1().write(|w| w.mr1().set_bit().mr20().set_bit());
 
-    // Set SleepOnExit
-    unsafe { cp.SCB.scr.write(SLEEPDEEP_OFF) };
-    // Set Stop 2 low-power mode, remove write protection from BDCR
-    dp.PWR
-        .cr1()
-        .write(|w| unsafe { w.lpms().bits(0b010).dbp().set_bit() });
+    unsafe {
+        // Set SleepOnExit
+        cp.SCB.scr.write(SLEEPDEEP_OFF);
+        // Set voltage scaling to range 2, low-power run mode and
+        // remove write protection from BDCR and RTC registers
+        dp.PWR.cr1().write(|w| {
+            w.vos()
+                .bits(2)
+                .lpr()
+                .set_bit()
+                .lpms()
+                .bits(1)
+                .dbp()
+                .set_bit()
+        });
+    }
     // Configure RTC, set periodic wake up
     while dp.RCC.csr().read().lsirdy().bit_is_clear() {}
     dp.RCC.bdcr().write(|w| w.rtcsel().lsi().rtcen().set_bit());
