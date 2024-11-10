@@ -455,10 +455,8 @@ fn main() -> ! {
     dp.GPIOA
         .otyper()
         .write(|w| w.ot0().push_pull().ot8().push_pull());
-    // NSS, IRQ are active low
-    dp.GPIOA
-        .pupdr()
-        .write(|w| w.pupdr1().pull_up().pupdr4().pull_up());
+    // NSS output is active low
+    dp.GPIOA.pupdr().write(|w| w.pupdr4().pull_up());
     dp.GPIOA.ospeedr().write(|w| {
         w.ospeedr2()
             .low_speed()
