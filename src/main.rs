@@ -25,6 +25,7 @@ const NOP: [u8; 1] = commands::Nop::bytes();
 const W_RF_CH: [u8; 2] = commands::WRegister(registers::RfCh::new().with_rf_ch(0)).bytes();
 const W_RF_SETUP: [u8; 2] =
     commands::WRegister(registers::RfSetup::new().with_rf_dr(false)).bytes();
+const W_SETUP_RETR: [u8; 2] = commands::WRegister(registers::SetupRetr::new().with_arc(15)).bytes();
 const W_SETUP_AW: [u8; 2] = commands::WRegister(registers::SetupAw::new().with_aw(1)).bytes();
 const W_TX_ADDR: [u8; 4] =
     commands::WRegister(registers::TxAddr::<3>::new().with_tx_addr(RF_ADDRESS)).bytes();
@@ -326,8 +327,8 @@ fn DMA1_CH2() {
 }
 
 /// Handle IRQ. Timing calculations for delay between payload upload and active IRQ:
-/// minimum delay ~ 130 + 305 (nrf24l01 p.38) + 130 + 49 = 624 us
-/// maximum delay ~ 130 + 305 + 250 + 130 + 305 + 250 + 130 + 305 + 130 + 50? ~ 2 ms
+/// minimum delay ~ 1320us + 130 + 305 (nrf24l01 p.38) + 130 + 49 ~ 2ms
+/// maximum delay ~ 1320us + (130 + 305 + 250) * 15 (retransmission) - 250 + 130 + 50? ~ 11.5 ms
 /// A UART byte is transacted in ~1 ms, so 32 bytes for the next payload will take 32ms.
 /// This means it should be safe to assume there is no ongoing SPI transaction.
 #[interrupt]
@@ -639,6 +640,7 @@ fn main() -> ! {
 
     unsafe {
         commands.enqueue_unchecked(&W_RF_SETUP);
+        commands.enqueue_unchecked(&W_SETUP_RETR);
         commands.enqueue_unchecked(&W_SETUP_AW);
         commands.enqueue_unchecked(&W_TX_ADDR);
         commands.enqueue_unchecked(&W_RX_ADDR_P0);
