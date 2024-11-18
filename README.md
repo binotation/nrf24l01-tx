@@ -8,5 +8,8 @@ The device will broadcast a _handshake_ request every 10 seconds. If a connectio
 ### GPS Protocol
 The GPS data is received as NMEA sentences.
 
+## State Diagram
+![](state_diagram.png)
+
 ## Pins
 ![](pins.png)

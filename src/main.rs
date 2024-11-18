@@ -178,12 +178,17 @@ fn listen_payload(dp: &mut DevicePeripherals) {
             .set_bit()
     });
     dp.USART2.cr1().write(|w| w.re().set_bit().ue().set_bit());
+    dp.GPIOA.bsrr().write(|w| w.bs8().set_bit());
 }
 
 #[inline]
 fn stop_listen_payload(dp: &mut DevicePeripherals) {
+    // Power off GPS
+    dp.GPIOA.bsrr().write(|w| w.br8().set_bit());
     // Disable USART and DMA Ch6
-    dp.USART2.cr1().write(|w| w.re().set_bit().ue().clear_bit());
+    dp.USART2
+        .cr1()
+        .write(|w| w.re().clear_bit().ue().clear_bit());
     dp.DMA1.ch6().cr().write(|w| {
         w.minc()
             .set_bit()
@@ -245,7 +250,6 @@ fn DMA1_CH2() {
                                 .clear_bit()
                         });
                         listen_payload(dp);
-                        dp.GPIOA.bsrr().write(|w| w.bs8().set_bit());
                         *state = State::Connected;
                     }
                     send_command(&RESET_INTERRUPTS, dp);
@@ -301,7 +305,6 @@ fn DMA1_CH2() {
                         let status = registers::Status::from_bits(unsafe { SPI1_RX_BUFFER[0] });
                         if status.max_rt() {
                             // Disconnected, power off GPS
-                            dp.GPIOA.bsrr().write(|w| w.br8().set_bit());
                             stop_listen_payload(dp);
                             unsafe {
                                 commands.enqueue_unchecked(&FLUSH_TX);
