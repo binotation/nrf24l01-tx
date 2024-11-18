@@ -1,8 +1,9 @@
 #![no_std]
 #![no_main]
 
+use core::arch::asm;
 use cortex_m::{asm, Peripherals as CorePeripherals};
-use cortex_m_rt::entry;
+use cortex_m_rt::{entry, pre_init};
 use gps_relay::sync_cell::{SyncPeripheral, SyncQueue, SyncState};
 use gps_relay::State;
 // use cortex_m_semihosting::hprintln;
@@ -437,6 +438,34 @@ fn TIM1_UP_TIM16() {
     }
 }
 
+#[pre_init]
+unsafe fn copy_flash_sections_to_ram() {
+    asm!(
+        // Copy vector table to SRAM1
+        "ldr r0, =__vector_table
+         ldr r1, =__evector_table
+         ldr r2, =__sivector_table
+         0:
+         cmp r1, r0
+         beq 1f
+         ldm r2!, {{r3}}
+         stm r0!, {{r3}}
+         b 0b
+         1:",
+        // Copy .rodata to SRAM1
+        "ldr r0, =__srodata
+         ldr r1, =__erodata
+         ldr r2, =__sirodata
+         0:
+         cmp r1, r0
+         beq 1f
+         ldm r2!, {{r3}}
+         stm r0!, {{r3}}
+         b 0b
+         1:"
+    );
+}
+
 #[entry]
 fn main() -> ! {
     // Device defaults to 4MHz clock
@@ -451,7 +480,9 @@ fn main() -> ! {
         .write(|w| w.msirange().range200k().msirgsel().set_bit());
 
     // Enable peripheral clocks
-    dp.RCC.ahb1enr().write(|w| w.dma1en().set_bit());
+    dp.RCC
+        .ahb1enr()
+        .write(|w| w.dma1en().set_bit().flashen().set_bit());
     dp.RCC.ahb2enr().write(|w| w.gpioaen().set_bit());
     dp.RCC.apb1enr1().write(|w| {
         w.usart2en()
@@ -466,6 +497,11 @@ fn main() -> ! {
     dp.RCC
         .apb2enr()
         .write(|w| w.spi1en().set_bit().tim16en().set_bit());
+    // Flash memory clock is gated off during sleep and stop
+    dp.RCC.ahb1smenr().write(|w| w.flashsmen().clear_bit());
+
+    // Power down flash during sleep
+    dp.FLASH.acr().write(|w| w.sleep_pd().set_bit());
 
     // USART2: A2 (TX), A3 (RX) as AF 7
     // SPI1: A4 (NSS), A5 (SCK), A6 (MISO), A7 (MOSI) as AF 5
