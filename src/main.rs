@@ -13,7 +13,7 @@ use stm32l4::stm32l4x2::{interrupt, Interrupt, Peripherals as DevicePeripherals}
 
 const USART2_RDR: u32 = 0x4000_4424;
 const SPI1_DR: u32 = 0x4001_300C;
-const RF_ADDRESS: u64 = 0xA2891F;
+const TX_ADDRESS: u64 = 0xA2891F;
 const SLEEPDEEP_ON: u32 = 0b110;
 const SLEEPDEEP_OFF: u32 = 0b010;
 const SLEEP_DURATION: u16 = 10;
@@ -22,27 +22,28 @@ static CORE_PERIPHERALS: SyncPeripheral<CorePeripherals> = SyncPeripheral::new()
 static DEVICE_PERIPHERALS: SyncPeripheral<DevicePeripherals> = SyncPeripheral::new();
 
 // Commands
-const NOP: [u8; 1] = commands::Nop::bytes();
-const W_RF_CH: [u8; 2] = commands::WRegister(registers::RfCh::new().with_rf_ch(0)).bytes();
-const W_RF_SETUP: [u8; 2] =
-    commands::WRegister(registers::RfSetup::new().with_rf_dr(false)).bytes();
-const W_SETUP_RETR: [u8; 2] = commands::WRegister(registers::SetupRetr::new().with_arc(15)).bytes();
-const W_SETUP_AW: [u8; 2] = commands::WRegister(registers::SetupAw::new().with_aw(1)).bytes();
-const W_TX_ADDR: [u8; 4] =
-    commands::WRegister(registers::TxAddr::<3>::new().with_tx_addr(RF_ADDRESS)).bytes();
-const W_RX_ADDR_P0: [u8; 4] =
-    commands::WRegister(registers::RxAddrP0::<3>::new().with_rx_addr_p0(RF_ADDRESS)).bytes();
-const W_CONFIG: [u8; 2] = commands::WRegister(
+const SETUP_AW: [u8; 2] = commands::WRegister(registers::SetupAw::new().with_aw(1)).bytes();
+const SETUP_RETR: [u8; 2] = commands::WRegister(registers::SetupRetr::new().with_arc(15)).bytes();
+const RF_CH: [u8; 2] = commands::WRegister(registers::RfCh::new().with_rf_ch(0)).bytes();
+const RF_SETUP: [u8; 2] = commands::WRegister(registers::RfSetup::new().with_rf_dr(false)).bytes();
+const RX_ADDR_P0: [u8; 4] =
+    commands::WRegister(registers::RxAddrP0::<3>::new().with_rx_addr_p0(TX_ADDRESS)).bytes();
+const TX_ADDR: [u8; 4] =
+    commands::WRegister(registers::TxAddr::<3>::new().with_tx_addr(TX_ADDRESS)).bytes();
+const ACTIVATE: [u8; 2] = commands::Activate::bytes();
+const FEATURE: [u8; 2] = commands::WRegister(registers::Feature::new().with_en_dpl(true)).bytes();
+const DYNPD: [u8; 2] = commands::WRegister(registers::Dynpd::new().with_dpl_p0(true)).bytes();
+const POWER_UP: [u8; 2] = commands::WRegister(
     registers::Config::new()
         .with_pwr_up(true)
         .with_mask_rx_dr(true),
 )
 .bytes();
+const HANDSHAKE: [u8; 2] = commands::WTxPayload([0; 1]).bytes();
 const POWER_DOWN: [u8; 2] =
     commands::WRegister(registers::Config::new().with_pwr_up(false)).bytes();
 const RESET_INTERRUPTS: [u8; 2] =
     commands::WRegister(registers::Status::new().with_max_rt(true).with_tx_ds(true)).bytes();
-const HANDSHAKE: [u8; 33] = commands::WTxPayload([b'C'; 32]).bytes();
 const FLUSH_TX: [u8; 1] = commands::FlushTx::bytes();
 
 static mut PAYLOAD_DOUBLE_BUFFER: [u8; 65] = [
@@ -113,7 +114,7 @@ static mut PAYLOAD_DOUBLE_BUFFER: [u8; 65] = [
     0,
 ];
 static mut SPI1_RX_BUFFER: [u8; 33] = [0; 33];
-static COMMANDS: SyncQueue<&[u8], 8> = SyncQueue::new();
+static COMMANDS: SyncQueue<&[u8], 16> = SyncQueue::new();
 static STATE: SyncState = SyncState::new();
 
 #[inline]
@@ -236,9 +237,7 @@ fn DMA1_CH2() {
                 State::HandshakeIrq => {
                     let status = registers::Status::from_bits(unsafe { SPI1_RX_BUFFER[0] });
                     if status.max_rt() {
-                        unsafe {
-                            commands.enqueue_unchecked(&POWER_DOWN);
-                        }
+                        send_command(&POWER_DOWN, dp);
                         *state = State::ContinueSleep;
                     } else if status.tx_ds() {
                         // Disable wake-up timer
@@ -252,7 +251,6 @@ fn DMA1_CH2() {
                         listen_payload(dp);
                         *state = State::Connected;
                     }
-                    send_command(&RESET_INTERRUPTS, dp);
                 }
                 State::BeginSleep => {
                     // This state is only entered from State::Connected
@@ -301,21 +299,19 @@ fn DMA1_CH2() {
                 }
                 State::Connected => {
                     #[allow(static_mut_refs)]
-                    if dp.DMA1.ch3().mar().read() == NOP.as_ptr() as u32 {
+                    if dp.DMA1.ch3().mar().read() == RESET_INTERRUPTS.as_ptr() as u32 {
                         let status = registers::Status::from_bits(unsafe { SPI1_RX_BUFFER[0] });
                         if status.max_rt() {
                             // Disconnected, power off GPS
                             stop_listen_payload(dp);
                             unsafe {
-                                commands.enqueue_unchecked(&FLUSH_TX);
                                 commands.enqueue_unchecked(&HANDSHAKE);
                                 commands.enqueue_unchecked(&POWER_DOWN);
                             }
+                            send_command(&FLUSH_TX, dp);
                             *state = State::BeginSleep;
-                        } else if status.tx_ds() {
-                            // TODO: TX FIFO counter
                         }
-                        send_command(&RESET_INTERRUPTS, dp);
+                        // Do nothing if TX_DS
                     } else if dp.DMA1.ch3().mar().read()
                         == unsafe { PAYLOAD_DOUBLE_BUFFER.as_ptr() } as u32
                         || dp.DMA1.ch3().mar().read()
@@ -340,7 +336,7 @@ fn EXTI1() {
     let dp = DEVICE_PERIPHERALS.get();
 
     if dp.EXTI.pr1().read().pr1().bit_is_set() {
-        send_command(&NOP, dp);
+        send_command(&RESET_INTERRUPTS, dp);
         dp.EXTI.pr1().write(|w| w.pr1().clear_bit_by_one());
     }
 }
@@ -373,7 +369,7 @@ fn RTC_WKUP() {
         }
         *state = State::HandshakePulse;
         // Power up nRF24L01
-        send_command(&W_CONFIG, dp);
+        send_command(&POWER_UP, dp);
     }
 }
 
@@ -678,12 +674,15 @@ fn main() -> ! {
     let commands = COMMANDS.get();
 
     unsafe {
-        commands.enqueue_unchecked(&W_RF_SETUP);
-        commands.enqueue_unchecked(&W_SETUP_RETR);
-        commands.enqueue_unchecked(&W_SETUP_AW);
-        commands.enqueue_unchecked(&W_TX_ADDR);
-        commands.enqueue_unchecked(&W_RX_ADDR_P0);
-        commands.enqueue_unchecked(&W_CONFIG);
+        commands.enqueue_unchecked(&SETUP_RETR);
+        commands.enqueue_unchecked(&RF_CH);
+        commands.enqueue_unchecked(&RF_SETUP);
+        commands.enqueue_unchecked(&RX_ADDR_P0);
+        commands.enqueue_unchecked(&TX_ADDR);
+        commands.enqueue_unchecked(&ACTIVATE);
+        commands.enqueue_unchecked(&FEATURE);
+        commands.enqueue_unchecked(&DYNPD);
+        commands.enqueue_unchecked(&POWER_UP);
         commands.enqueue_unchecked(&HANDSHAKE);
 
         // Unmask NVIC global interrupts
@@ -700,7 +699,7 @@ fn main() -> ! {
 
     let dp = DEVICE_PERIPHERALS.get();
 
-    send_command(&W_RF_CH, dp);
+    send_command(&SETUP_AW, dp);
 
     loop {
         asm::wfi();
