@@ -14,7 +14,7 @@ use stm32l4::stm32l4x2::{interrupt, Interrupt, Peripherals as DevicePeripherals}
 const USART2_RDR: u32 = 0x4000_4424;
 const SPI1_DR: u32 = 0x4001_300C;
 const TX_ADDRESS: u64 = 0xA2891F;
-const SLEEPDEEP_ON: u32 = 0b110;
+const SLEEPDEEP_ON: u32 = 0b010;
 const SLEEPDEEP_OFF: u32 = 0b010;
 const SLEEP_DURATION: u16 = 10;
 
@@ -22,6 +22,7 @@ static CORE_PERIPHERALS: SyncPeripheral<CorePeripherals> = SyncPeripheral::new()
 static DEVICE_PERIPHERALS: SyncPeripheral<DevicePeripherals> = SyncPeripheral::new();
 
 // Commands
+const R_CONFIG: [u8; 2] = commands::RRegister::<registers::Config>::bytes();
 const SETUP_AW: [u8; 2] = commands::WRegister(registers::SetupAw::new().with_aw(1)).bytes();
 const SETUP_RETR: [u8; 2] = commands::WRegister(registers::SetupRetr::new().with_arc(15)).bytes();
 const RF_CH: [u8; 2] = commands::WRegister(registers::RfCh::new().with_rf_ch(0)).bytes();
@@ -235,93 +236,99 @@ fn DMA1_CH2() {
         if let Some(command) = commands.dequeue() {
             send_command(command, dp);
         } else {
-            match *state {
-                State::HandshakePulse => {
-                    // Wait for nRF24L01 to power up
-                    dp.TIM16.cr1().write(|w| w.opm().enabled().cen().enabled());
-                    *state = State::HandshakeIrq;
-                }
-                State::HandshakeIrq => {
-                    let status = registers::Status::from_bits(unsafe { SPI1_RX_BUFFER[0] });
-                    if status.max_rt() {
-                        send_command(&POWER_DOWN, dp);
-                        *state = State::ContinueSleep;
-                    } else if status.tx_ds() {
-                        send_command(&POWER_UP_MASK_TX_DS, dp);
-                        // Disable wake-up timer
+            if dp.DMA1.ch3().mar().read() == R_CONFIG.as_ptr() as u32 {
+                dp.USART1
+                    .tdr()
+                    .write(|w| w.tdr().set(unsafe { SPI1_RX_BUFFER[1] as u16 }));
+            } else {
+                match *state {
+                    State::HandshakePulse => {
+                        // Wait for nRF24L01 to power up
+                        dp.TIM16.cr1().write(|w| w.opm().enabled().cen().enabled());
+                        *state = State::HandshakeIrq;
+                    }
+                    State::HandshakeIrq => {
+                        let status = registers::Status::from_bits(unsafe { SPI1_RX_BUFFER[0] });
+                        if status.max_rt() {
+                            send_command(&POWER_DOWN, dp);
+                            *state = State::ContinueSleep;
+                        } else if status.tx_ds() {
+                            send_command(&POWER_UP_MASK_TX_DS, dp);
+                            // Disable wake-up timer
+                            dp.RTC.cr().write(|w| {
+                                unsafe { w.wucksel().bits(0b100) }
+                                    .wutie()
+                                    .set_bit()
+                                    .wute()
+                                    .clear_bit()
+                            });
+                            listen_payload(dp);
+                            *state = State::Connected;
+                        }
+                    }
+                    State::BeginSleep => {
+                        // This state is only entered from State::Connected
+                        // Enable wake-up timer
+                        while dp.RTC.isr().read().wutwf().bit_is_clear() {}
                         dp.RTC.cr().write(|w| {
                             unsafe { w.wucksel().bits(0b100) }
                                 .wutie()
                                 .set_bit()
                                 .wute()
-                                .clear_bit()
-                        });
-                        listen_payload(dp);
-                        *state = State::Connected;
-                    }
-                }
-                State::BeginSleep => {
-                    // This state is only entered from State::Connected
-                    // Enable wake-up timer
-                    while dp.RTC.isr().read().wutwf().bit_is_clear() {}
-                    dp.RTC.cr().write(|w| {
-                        unsafe { w.wucksel().bits(0b100) }
-                            .wutie()
-                            .set_bit()
-                            .wute()
-                            .set_bit()
-                    });
-                    unsafe {
-                        cp.SCB.scr.write(SLEEPDEEP_ON);
-                        // Prepare to enter Stop 2: enter run mode range 2 with Stop 2 selected
-                        dp.PWR.cr1().write(|w| {
-                            w.vos()
-                                .bits(2)
-                                .lpr()
-                                .clear_bit()
-                                .lpms()
-                                .bits(2)
-                                .dbp()
                                 .set_bit()
                         });
-                    }
-                    while dp.PWR.sr2().read().reglpf().bit_is_set() {}
-                }
-                State::ContinueSleep => {
-                    unsafe {
-                        // This state is only entered from wake-up and the wake-up timer is already enabled.
-                        cp.SCB.scr.write(SLEEPDEEP_ON);
-                        // Prepare to enter Stop 2: enter run mode range 2 with Stop 2 selected
-                        dp.PWR.cr1().write(|w| {
-                            w.vos()
-                                .bits(2)
-                                .lpr()
-                                .clear_bit()
-                                .lpms()
-                                .bits(2)
-                                .dbp()
-                                .set_bit()
-                        });
-                    }
-                    while dp.PWR.sr2().read().reglpf().bit_is_set() {}
-                }
-                State::Connected => {
-                    #[allow(static_mut_refs)]
-                    if dp.DMA1.ch3().mar().read() == RESET_INTERRUPTS.as_ptr() as u32 {
-                        // MAX_RT asserted -> receiver has disconnected: power off GPS
-                        stop_listen_payload(dp);
                         unsafe {
-                            commands.enqueue_unchecked(&HANDSHAKE);
-                            commands.enqueue_unchecked(&POWER_DOWN);
+                            cp.SCB.scr.write(SLEEPDEEP_ON);
+                            // Prepare to enter Stop 2: enter run mode range 2 with Stop 2 selected
+                            dp.PWR.cr1().write(|w| {
+                                w.vos()
+                                    .bits(2)
+                                    .lpr()
+                                    .clear_bit()
+                                    .lpms()
+                                    .bits(2)
+                                    .dbp()
+                                    .set_bit()
+                            });
                         }
-                        send_command(&FLUSH_TX, dp);
-                        *state = State::BeginSleep;
-                    } else if dp.DMA1.ch3().mar().read()
-                        == unsafe { PAYLOAD_DOUBLE_BUFFER.as_ptr() } as u32
-                        || dp.DMA1.ch3().mar().read()
-                            == unsafe { PAYLOAD_DOUBLE_BUFFER[32..].as_ptr() } as u32
-                    {
-                        pulse_ce(dp);
+                        while dp.PWR.sr2().read().reglpf().bit_is_set() {}
+                    }
+                    State::ContinueSleep => {
+                        unsafe {
+                            // This state is only entered from wake-up and the wake-up timer is already enabled.
+                            cp.SCB.scr.write(SLEEPDEEP_ON);
+                            // Prepare to enter Stop 2: enter run mode range 2 with Stop 2 selected
+                            dp.PWR.cr1().write(|w| {
+                                w.vos()
+                                    .bits(2)
+                                    .lpr()
+                                    .clear_bit()
+                                    .lpms()
+                                    .bits(2)
+                                    .dbp()
+                                    .set_bit()
+                            });
+                        }
+                        while dp.PWR.sr2().read().reglpf().bit_is_set() {}
+                    }
+                    State::Connected => {
+                        #[allow(static_mut_refs)]
+                        if dp.DMA1.ch3().mar().read() == RESET_INTERRUPTS.as_ptr() as u32 {
+                            // MAX_RT asserted -> receiver has disconnected: power off GPS
+                            stop_listen_payload(dp);
+                            unsafe {
+                                commands.enqueue_unchecked(&HANDSHAKE);
+                                commands.enqueue_unchecked(&POWER_DOWN);
+                            }
+                            send_command(&FLUSH_TX, dp);
+                            *state = State::BeginSleep;
+                        } else if dp.DMA1.ch3().mar().read()
+                            == unsafe { PAYLOAD_DOUBLE_BUFFER.as_ptr() } as u32
+                            || dp.DMA1.ch3().mar().read()
+                                == unsafe { PAYLOAD_DOUBLE_BUFFER[32..].as_ptr() } as u32
+                        {
+                            pulse_ce(dp);
+                        }
                     }
                 }
             }
@@ -474,8 +481,8 @@ fn USART1() {
     let dp = DEVICE_PERIPHERALS.get();
 
     if dp.USART1.isr().read().rxne().bit_is_set() {
-        let received_byte = dp.USART1.rdr().read().rdr().bits();
-        dp.USART1.tdr().write(|w| unsafe { w.tdr().bits(received_byte) });
+        let _received_byte = dp.USART1.rdr().read().rdr().bits();
+        send_command(&R_CONFIG, dp);
     }
     if dp.USART1.isr().read().ore().bit_is_set() {
         dp.USART1.icr().write(|w| w.orecf().set_bit());
@@ -510,8 +517,14 @@ fn main() -> ! {
             .rtcapben()
             .set_bit()
     });
-    dp.RCC
-        .apb2enr().write(|w| w.spi1en().set_bit().tim16en().set_bit().usart1en().set_bit());
+    dp.RCC.apb2enr().write(|w| {
+        w.spi1en()
+            .set_bit()
+            .tim16en()
+            .set_bit()
+            .usart1en()
+            .set_bit()
+    });
 
     // Flash memory clock is gated off during sleep and stop
     dp.RCC.ahb1smenr().write(|w| w.flashsmen().clear_bit());
@@ -541,8 +554,10 @@ fn main() -> ! {
             .alternate()
             .moder8()
             .output()
-            .moder9().alternate()
-            .moder10().alternate()
+            .moder9()
+            .alternate()
+            .moder10()
+            .alternate()
     });
     dp.GPIOA
         .otyper()
@@ -678,7 +693,16 @@ fn main() -> ! {
 
     // USART2: enable DMA RX
     dp.USART2.cr3().write(|w| w.dmar().set_bit());
-    dp.USART1.cr1().write(|w| w.rxneie().set_bit().re().set_bit().te().set_bit().ue().set_bit());
+    dp.USART1.cr1().write(|w| {
+        w.rxneie()
+            .set_bit()
+            .re()
+            .set_bit()
+            .te()
+            .set_bit()
+            .ue()
+            .set_bit()
+    });
 
     // SPI1: Set FIFO reception threshold to 1/4, enable slave select output, enable DMA
     dp.SPI1.cr2().write(|w| {
