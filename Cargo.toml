@@ -1,5 +1,5 @@
 [package]
-authors = ["binotation"]
+authors = ["Jingwei Ni <ni.jingwei.2210@gmail.com>"]
 edition = "2021"
 readme = "README.md"
 name = "gps-relay"
