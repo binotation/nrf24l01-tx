@@ -39,6 +39,13 @@ const POWER_UP: [u8; 2] = commands::WRegister(
         .with_mask_rx_dr(true),
 )
 .bytes();
+const POWER_UP_MASK_TX_DS: [u8; 2] = commands::WRegister(
+    registers::Config::new()
+        .with_pwr_up(true)
+        .with_mask_tx_ds(true)
+        .with_mask_rx_dr(true),
+)
+.bytes();
 const HANDSHAKE: [u8; 2] = commands::WTxPayload([0; 1]).bytes();
 const POWER_DOWN: [u8; 2] =
     commands::WRegister(registers::Config::new().with_pwr_up(false)).bytes();
@@ -240,6 +247,7 @@ fn DMA1_CH2() {
                         send_command(&POWER_DOWN, dp);
                         *state = State::ContinueSleep;
                     } else if status.tx_ds() {
+                        send_command(&POWER_UP_MASK_TX_DS, dp);
                         // Disable wake-up timer
                         dp.RTC.cr().write(|w| {
                             unsafe { w.wucksel().bits(0b100) }
@@ -300,18 +308,14 @@ fn DMA1_CH2() {
                 State::Connected => {
                     #[allow(static_mut_refs)]
                     if dp.DMA1.ch3().mar().read() == RESET_INTERRUPTS.as_ptr() as u32 {
-                        let status = registers::Status::from_bits(unsafe { SPI1_RX_BUFFER[0] });
-                        if status.max_rt() {
-                            // Disconnected, power off GPS
-                            stop_listen_payload(dp);
-                            unsafe {
-                                commands.enqueue_unchecked(&HANDSHAKE);
-                                commands.enqueue_unchecked(&POWER_DOWN);
-                            }
-                            send_command(&FLUSH_TX, dp);
-                            *state = State::BeginSleep;
+                        // MAX_RT asserted -> receiver has disconnected: power off GPS
+                        stop_listen_payload(dp);
+                        unsafe {
+                            commands.enqueue_unchecked(&HANDSHAKE);
+                            commands.enqueue_unchecked(&POWER_DOWN);
                         }
-                        // Do nothing if TX_DS
+                        send_command(&FLUSH_TX, dp);
+                        *state = State::BeginSleep;
                     } else if dp.DMA1.ch3().mar().read()
                         == unsafe { PAYLOAD_DOUBLE_BUFFER.as_ptr() } as u32
                         || dp.DMA1.ch3().mar().read()
