@@ -21,7 +21,7 @@ nrf24l01-commands = "1.1.2"
 
 [dependencies.stm32l4]
 path = "../../stm32-rs-nightlies/stm32l4"
-features = ["stm32l4x2"]
+features = ["stm32l412"]
 
 # this lets you use `cargo fix`!
 [[bin]]

@@ -18,11 +18,11 @@
   "Address (..) is out of bounds" in the disassembly produced by `objdump`.
 */
 
-/* From stm32l432kc datasheet chapter 5 */
+/* From stm32l412k8 datasheet p.13,18 */
 MEMORY
 {
-  FLASH : ORIGIN = 0x08000000, LENGTH = 256K
-  RAM : ORIGIN = 0x20000000, LENGTH = 48K
+  FLASH : ORIGIN = 0x08000000, LENGTH = 64K
+  RAM : ORIGIN = 0x20000000, LENGTH = 32K
 }
 
 /* # Entry point = reset vector */

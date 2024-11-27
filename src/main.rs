@@ -9,7 +9,7 @@ use gps_relay::State;
 // use cortex_m_semihosting::hprintln;
 use nrf24l01_commands::{commands, commands::Command, registers};
 use panic_semihosting as _; // logs messages to the host stderr; requires a debugger
-use stm32l4::stm32l4x2::{interrupt, Interrupt, Peripherals as DevicePeripherals};
+use stm32l4::stm32l412::{interrupt, Interrupt, Peripherals as DevicePeripherals};
 
 const USART2_RDR: u32 = 0x4000_4424;
 const SPI1_DR: u32 = 0x4001_300C;
@@ -350,8 +350,8 @@ fn RTC_WKUP() {
     let dp = DEVICE_PERIPHERALS.get();
     let state = STATE.get();
 
-    if dp.RTC.isr().read().wutf().bit_is_set() {
-        dp.RTC.isr().modify(|_, w| w.wutf().clear_bit());
+    if dp.RTC.sr().read().wutf().bit_is_set() {
+        dp.RTC.scr().write(|w| w.cwutf().set_bit());
         dp.EXTI.pr1().write(|w| w.pr20().clear_bit_by_one());
         unsafe {
             // Don't go back into Stop 2
@@ -587,15 +587,15 @@ fn main() -> ! {
     dp.RTC.wpr().write(|w| unsafe { w.key().bits(0xCA) });
     dp.RTC.wpr().write(|w| unsafe { w.key().bits(0x53) });
     // Enter init mode to set prescaler values
-    dp.RTC.isr().write(|w| w.init().set_bit());
-    while dp.RTC.isr().read().initf().bit_is_clear() {}
+    dp.RTC.icsr().write(|w| w.init().set_bit());
+    while dp.RTC.icsr().read().initf().bit_is_clear() {}
     dp.RTC
         .prer()
         .write(|w| unsafe { w.prediv_a().bits(127).prediv_s().bits(249) });
-    dp.RTC.isr().write(|w| w.init().clear_bit());
+    dp.RTC.icsr().write(|w| w.init().clear_bit());
     // Turn off wake-up timer
     dp.RTC.cr().write(|w| w.wute().clear_bit());
-    while dp.RTC.isr().read().wutwf().bit_is_clear() {}
+    while dp.RTC.icsr().read().wutwf().bit_is_clear() {}
     // Write wake-up timer registers
     dp.RTC
         .wutr()

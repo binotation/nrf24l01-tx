@@ -2,7 +2,7 @@ use crate::State;
 use core::cell::UnsafeCell;
 use cortex_m::Peripherals as CorePeripherals;
 use static_fifo_queue::Queue;
-use stm32l4::stm32l4x2::Peripherals as DevicePeripherals;
+use stm32l4::stm32l412::Peripherals as DevicePeripherals;
 
 pub struct SyncPeripheral<P>(UnsafeCell<Option<P>>);
 
