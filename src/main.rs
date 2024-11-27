@@ -263,7 +263,6 @@ fn DMA1_CH2() {
                 State::BeginSleep => {
                     // This state is only entered from State::Connected
                     // Enable wake-up timer
-                    while dp.RTC.isr().read().wutwf().bit_is_clear() {}
                     dp.RTC.cr().write(|w| {
                         unsafe { w.wucksel().bits(0b100) }
                             .wutie()
@@ -489,7 +488,7 @@ fn main() -> ! {
     dp.RCC.ahb2enr().write(|w| w.gpioaen().set_bit());
     dp.RCC.apb1enr1().write(|w| {
         w.usart2en()
-            .enabled()
+            .set_bit()
             .tim6en()
             .set_bit()
             .pwren()
