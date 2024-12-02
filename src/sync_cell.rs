@@ -1,7 +1,7 @@
-use crate::state::State;
+use crate::State;
 use core::cell::UnsafeCell;
 use cortex_m::Peripherals as CorePeripherals;
-use heapless::spsc::Queue;
+use static_fifo_queue::Queue;
 use stm32l4::stm32l4x2::Peripherals as DevicePeripherals;
 
 pub struct SyncPeripheral<P>(UnsafeCell<Option<P>>);
@@ -67,26 +67,6 @@ impl SyncState {
 unsafe impl Sync for SyncState {}
 
 impl Default for SyncState {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-pub struct SyncNum<T>(UnsafeCell<T>);
-
-impl SyncNum<u8> {
-    pub const fn new() -> Self {
-        Self(UnsafeCell::new(0))
-    }
-
-    #[allow(clippy::mut_from_ref)]
-    pub const fn get(&self) -> &mut u8 {
-        unsafe { &mut *self.0.get() }
-    }
-}
-unsafe impl Sync for SyncNum<u8> {}
-
-impl Default for SyncNum<u8> {
     fn default() -> Self {
         Self::new()
     }

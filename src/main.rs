@@ -309,10 +309,8 @@ fn DMA1_CH2() {
                     if dp.DMA1.ch3().mar().read() == RESET_INTERRUPTS.as_ptr() as u32 {
                         // MAX_RT asserted -> receiver has disconnected: power off GPS
                         stop_listen_payload(dp);
-                        unsafe {
-                            commands.enqueue_unchecked(&HANDSHAKE);
-                            commands.enqueue_unchecked(&POWER_DOWN);
-                        }
+                        commands.enqueue(&HANDSHAKE);
+                        commands.enqueue(&POWER_DOWN);
                         send_command(&FLUSH_TX, dp);
                         *state = State::BeginSleep;
                     } else if dp.DMA1.ch3().mar().read()
@@ -675,19 +673,18 @@ fn main() -> ! {
 
     // Initialization commands
     let commands = COMMANDS.get();
+    commands.enqueue(&SETUP_RETR);
+    commands.enqueue(&RF_CH);
+    commands.enqueue(&RF_SETUP);
+    commands.enqueue(&RX_ADDR_P0);
+    commands.enqueue(&TX_ADDR);
+    commands.enqueue(&ACTIVATE);
+    commands.enqueue(&FEATURE);
+    commands.enqueue(&DYNPD);
+    commands.enqueue(&POWER_UP);
+    commands.enqueue(&HANDSHAKE);
 
     unsafe {
-        commands.enqueue_unchecked(&SETUP_RETR);
-        commands.enqueue_unchecked(&RF_CH);
-        commands.enqueue_unchecked(&RF_SETUP);
-        commands.enqueue_unchecked(&RX_ADDR_P0);
-        commands.enqueue_unchecked(&TX_ADDR);
-        commands.enqueue_unchecked(&ACTIVATE);
-        commands.enqueue_unchecked(&FEATURE);
-        commands.enqueue_unchecked(&DYNPD);
-        commands.enqueue_unchecked(&POWER_UP);
-        commands.enqueue_unchecked(&HANDSHAKE);
-
         // Unmask NVIC global interrupts
         cortex_m::peripheral::NVIC::unmask(Interrupt::RTC_WKUP);
         cortex_m::peripheral::NVIC::unmask(Interrupt::DMA1_CH2);
